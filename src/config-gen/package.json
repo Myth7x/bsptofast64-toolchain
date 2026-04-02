@@ -1,0 +1,12 @@
+{
+  "name": "config-gen",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "prompts": "^2.4.2"
+  }
+}
