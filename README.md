@@ -1,9 +1,11 @@
-# CSS Map to SM64 Conversion Pipeline
+# bsp counter-strike:source to fast64 export Conversion Pipeline
+This is a sub project of a larger effort to create a comprehensive Source-to-SM64 conversion pipeline. 
+So normal sm64 levels are not compatible with this pipeline, and the output of this pipeline is not compatible with normal sm64 levels.
 
 ## Overview
 This project converts a Source Engine `.bsp` map (e.g. Counter-Strike: Source) into a Super Mario 64–compatible level format.
 
-The pipeline extracts geometry, processes it through Blender, and exports it using SM64 tooling.
+The pipeline extracts geometry, processes it through Blender, and exports it using Fast64.
 
 ---
 
@@ -65,3 +67,4 @@ python -m cssmap2sm64 yourmap.bsp
 - Source maps often contain non-manifold or unnecessary geometry.
 - Scale mismatches are common; verify dimensions before export.
 - Props and models may need separate extraction and handling.
+
