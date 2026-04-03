@@ -61,6 +61,7 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
 
     for (const auto& f : bsp.faces) {
         if (f.numedges < 3) continue;
+        if (f.dispInfo >= 0) continue;
         if (f.texinfo < 0 || f.texinfo >= (int)bsp.texinfos.size()) continue;
 
         const BSPTexInfo& ti = bsp.texinfos[f.texinfo];
@@ -129,8 +130,8 @@ static void write_obj(const std::vector<Face>& faces,
         size_t n = f.verts.size();
         for (size_t t = 1; t < n - 1; ++t) {
             obj << "f " << vi       << "/1"
-                << " "  << vi + t+1 << "/1"
-                << " "  << vi + t   << "/1\n";
+                << " "  << vi + t   << "/1"
+                << " "  << vi + t+1 << "/1\n";
         }
         vi += n;
     }

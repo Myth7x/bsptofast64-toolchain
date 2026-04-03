@@ -115,7 +115,7 @@ def _write_script(
 
 
 
-def _write_level_yaml(dst: Path, level_name: str) -> None:
+def _write_level_yaml(dst: Path, level_name: str, skybox_bin: str = "water") -> None:
     content = (
         f"short-name: {level_name}\n"
         f"full-name: {level_name}\n"
@@ -123,7 +123,7 @@ def _write_level_yaml(dst: Path, level_name: str) -> None:
         f"area-count: 1\n"
         f"objects: []\n"
         f"shared-path: []\n"
-        f"skybox-bin: water\n"
+        f"skybox-bin: {skybox_bin}\n"
         f"texture-bin: generic\n"
         f"effects: false\n"
         f"actor-bins: []\n"
@@ -138,6 +138,7 @@ def convert(
     level_name: str,
     collision_divisor: int = 150,
     sm64_spawn: Optional[Tuple[int, int, int]] = None,
+    skybox_bin: str = "water",
 ) -> None:
     fast64_dir = Path(fast64_dir)
     out_dir = Path(out_dir)
@@ -172,6 +173,6 @@ def convert(
 
     _write_script(fast64_dir / "script.c", out_dir / "script.c", sm64_spawn)
 
-    _write_level_yaml(out_dir / "level.yaml", level_name)
+    _write_level_yaml(out_dir / "level.yaml", level_name, skybox_bin)
 
     (out_dir / "texture.inc.c").write_text("", encoding="utf-8")

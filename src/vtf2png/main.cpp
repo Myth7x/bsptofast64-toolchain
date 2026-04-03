@@ -58,6 +58,12 @@ int main(int argc, char* argv[]) {
         while (nh > (unsigned int)max_size) nh /= 2;
     }
 
+    while (nw * nh * 2 > 4096) {
+        if (nw >= nh) nw /= 2; else nh /= 2;
+        if (nw < 1) nw = 1;
+        if (nh < 1) nh = 1;
+    }
+
     vlByte* pixels = rgba;
     vlByte* resized = nullptr;
     if (nw != w || nh != h) {

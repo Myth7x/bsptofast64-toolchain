@@ -1,11 +1,64 @@
 import json
+import re
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
 
 from .cli import build_parser
 from .stages import unpack_pak, blend_run, f64_to_native, parse_vmt
+
+_BG_SEGMENT = {
+    "OCEAN_SKY": "water",
+    "FLAMING_SKY": "bitfs",
+    "UNDERWATER_CITY": "wdw",
+    "BELOW_CLOUDS": "cloud_floor",
+    "SNOW_MOUNTAINS": "ccm",
+    "DESERT": "ssl",
+    "HAUNTED": "bbh",
+    "GREEN_SKY": "bidw",
+    "ABOVE_CLOUDS": "clouds",
+    "PURPLE_SKY": "bits",
+}
+
+_SKY_HINTS = [
+    ("dust", "DESERT"), ("sand", "DESERT"), ("desert", "DESERT"),
+    ("snow", "SNOW_MOUNTAINS"), ("ice", "SNOW_MOUNTAINS"), ("ccm", "SNOW_MOUNTAINS"),
+    ("night", "HAUNTED"), ("haunted", "HAUNTED"), ("bbh", "HAUNTED"),
+    ("ocean", "OCEAN_SKY"), ("water", "OCEAN_SKY"), ("tides", "OCEAN_SKY"),
+    ("underwater", "UNDERWATER_CITY"),
+    ("fire", "FLAMING_SKY"), ("lava", "FLAMING_SKY"), ("bitfs", "FLAMING_SKY"),
+    ("purple", "PURPLE_SKY"), ("lunacy", "PURPLE_SKY"),
+    ("green", "GREEN_SKY"),
+    ("cloud", "ABOVE_CLOUDS"), ("sky", "ABOVE_CLOUDS"),
+]
+
+
+def _read_skyname(bsp_path: str) -> str:
+    with open(bsp_path, "rb") as f:
+        f.read(8)
+        lump_table = f.read(64 * 16)
+    fileofs, filelen = struct.unpack_from("<ii", lump_table, 0 * 16)
+    with open(bsp_path, "rb") as f:
+        f.seek(fileofs)
+        entities = f.read(filelen).decode("utf-8", errors="replace")
+    for block in re.split(r'(?<=\})\s*(?=\{)', entities):
+        if '"classname" "worldspawn"' in block:
+            m = re.search(r'"skyname"\s+"([^"]+)"', block)
+            if m:
+                return m.group(1).lower()
+    return ""
+
+
+def _skyname_to_background(skyname: str, sky_map: dict, default: str) -> str:
+    if skyname in sky_map:
+        return sky_map[skyname]
+    for hint, bg in _SKY_HINTS:
+        if hint in skyname:
+            return bg
+    return default
+
 
 _ROOT = Path(__file__).parent.parent
 _VENDOR = _ROOT / "vendor"
@@ -39,6 +92,8 @@ def main():
     cfg.setdefault("area_id", 1)
     cfg.setdefault("is_custom_level", True)
     cfg.setdefault("texture_resolution_limit", 512)
+    cfg.setdefault("default_background", "ABOVE_CLOUDS")
+    cfg.setdefault("sky_map", {})
 
     bsp = Path(args.bsp).resolve()
     if not bsp.exists():
@@ -77,6 +132,11 @@ def main():
         bsp2obj_cmd.append("--keep-tools")
     subprocess.run(bsp2obj_cmd, check=True)
 
+    skyname = _read_skyname(str(bsp))
+    background = _skyname_to_background(skyname, cfg["sky_map"], cfg["default_background"])
+    skybox_bin = _BG_SEGMENT.get(background, "water")
+    print(f"  Sky: {skyname!r} -> background={background} skybox-bin={skybox_bin}")
+
     spawn_bl  = (0.0, 0.0, 0.0)
     sm64_spawn = (0, 0, 0)
     if spawn_file.exists():
@@ -99,7 +159,8 @@ def main():
 
     print("[2/4] Extracting PAK textures...")
     vtf_files, vmt_files = unpack_pak.extract_pak(str(bsp), str(tex_dir))
-    max_size = str(cfg["texture_resolution_limit"])
+    _res = cfg["texture_resolution_limit"]
+    max_size = "0" if _res == "auto" else str(int(_res))
     for vtf in vtf_files:
         png = str(Path(vtf).with_suffix(".png"))
         subprocess.run([str(vtf2png_bin), vtf, png, max_size], check=True)
@@ -126,6 +187,7 @@ def main():
         scale=cfg["blender_to_sm64_scale"],
         spawn=spawn_bl,
         materials_json=materials_json,
+        background=background,
     )
     level_name = cfg["level_name"]
     print("[4/5] Converting Fast64 output to native sm64-port format...")
@@ -136,6 +198,7 @@ def main():
         level_name,
         collision_divisor=cfg["collision_divisor"],
         sm64_spawn=sm64_spawn,
+        skybox_bin=skybox_bin,
     )
 
     sm64_port_path = cfg.get("sm64_port_path", "")
