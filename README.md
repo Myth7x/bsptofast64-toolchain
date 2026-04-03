@@ -32,28 +32,6 @@ python -m cssmap2sm64 yourmap.bsp
 
 ## Pipeline Steps
 
-### 1. BSP Extraction
-- Tool: BSPSource
-- Input: `.bsp`
-- Output: `.vmf`
-- Purpose: Convert compiled Source map into editable format
-
-### 2. Geometry Conversion
-- Extract geometry from `.vmf`
-- Convert into:
-  - `.obj` (preferred), or
-  - `.smd` / `.dmx`
-
-### 3. Blender Processing
-- Import geometry into Blender
-- Perform cleanup:
-  - Remove invisible faces
-  - Fix flipped normals
-  - Apply correct scale (critical for SM64)
-
-### 4. SM64 Export
-- Tool: Fast64 (Blender plugin)
-- Convert `.blend` scene into SM64-compatible level data
-
-### 5. (Optional) Convert to compatible native map format
-- Using custom module f64_to_native
+### 1. BSP to OBJ Conversion
+### 2. Extracting PAK Textures
+### 3. Exporting to SM64 via Blender/Fast64
