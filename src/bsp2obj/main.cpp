@@ -7,6 +7,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -14,6 +15,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -58,101 +60,122 @@ struct Face {
 };
 
 static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
-    std::vector<Face> out;
+    unsigned int hc = std::max(1u, std::thread::hardware_concurrency());
+    size_t total = bsp.faces.size();
+    size_t chunk_size = (total + hc - 1) / hc;
 
-    for (const auto& f : bsp.faces) {
-        if (f.numedges < 3) continue;
-        if (f.texinfo < 0 || f.texinfo >= (int)bsp.texinfos.size()) continue;
+    auto process_range = [&](size_t lo, size_t hi) -> std::vector<Face> {
+        std::vector<Face> sub;
+        for (size_t fi = lo; fi < hi; ++fi) {
+            const auto& f = bsp.faces[fi];
+            if (f.numedges < 3) continue;
+            if (f.texinfo < 0 || f.texinfo >= (int)bsp.texinfos.size()) continue;
 
-        const BSPTexInfo& ti = bsp.texinfos[f.texinfo];
+            const BSPTexInfo& ti = bsp.texinfos[f.texinfo];
 
-        if (f.dispInfo < 0) {
-            if (!keep_tools) {
-                if (ti.flags & (SURF_NODRAW | SURF_SKY | SURF_SKY2D | SURF_HINT | SURF_SKIP)) continue;
-            }
-        }
-
-        if (ti.texdata < 0 || ti.texdata >= (int)bsp.texdatas.size()) continue;
-
-        int nameID = bsp.texdatas[ti.texdata].nameStringTableID;
-        if (nameID < 0 || nameID >= (int)bsp.texnames.size()) continue;
-
-        const std::string& matname = bsp.texnames[nameID];
-        if (f.dispInfo < 0 && !keep_tools && is_tool_material(matname)) continue;
-
-        Face face;
-        face.material = matname;
-
-        for (int e = 0; e < f.numedges; ++e) {
-            int32_t se = bsp.surfedges[f.firstedge + e];
-            uint16_t vi = (se >= 0) ? bsp.edges[se].v[0] : bsp.edges[-se].v[1];
-            if (vi >= bsp.vertices.size()) continue;
-            const BSPVertex& v = bsp.vertices[vi];
-            face.verts.push_back({v.x, v.y, v.z});
-        }
-
-        if (face.verts.size() < 3) continue;
-
-        if (f.dispInfo >= 0) {
-            if (f.dispInfo >= (int)bsp.dispinfos.size()) continue;
-            if (face.verts.size() != 4) continue;
-            const BSPDispInfo& di = bsp.dispinfos[f.dispInfo];
-
-            int start_idx = 0;
-            float best = std::numeric_limits<float>::max();
-            for (int k = 0; k < 4; ++k) {
-                float dx = face.verts[k][0] - di.startPosition[0];
-                float dy = face.verts[k][1] - di.startPosition[1];
-                float dz = face.verts[k][2] - di.startPosition[2];
-                float d = dx*dx + dy*dy + dz*dz;
-                if (d < best) { best = d; start_idx = k; }
+            if (f.dispInfo < 0) {
+                if (!keep_tools) {
+                    if (ti.flags & (SURF_NODRAW | SURF_SKY | SURF_SKY2D | SURF_HINT | SURF_SKIP)) continue;
+                }
             }
 
-            std::array<std::array<float,3>,4> c;
-            for (int k = 0; k < 4; ++k)
-                c[k] = face.verts[(start_idx + k) % 4];
+            if (ti.texdata < 0 || ti.texdata >= (int)bsp.texdatas.size()) continue;
 
-            int N = (1 << di.power) + 1;
-            int base = di.dispVertStart;
+            int nameID = bsp.texdatas[ti.texdata].nameStringTableID;
+            if (nameID < 0 || nameID >= (int)bsp.texnames.size()) continue;
 
-            std::vector<std::array<float,3>> grid(N * N);
-            for (int gi = 0; gi < N; ++gi) {
-                float v = (N > 1) ? (float)gi / (N - 1) : 0.0f;
-                for (int gj = 0; gj < N; ++gj) {
-                    float u = (N > 1) ? (float)gj / (N - 1) : 0.0f;
-                    float bx = c[0][0]*(1-u)*(1-v) + c[1][0]*u*(1-v) + c[2][0]*u*v + c[3][0]*(1-u)*v;
-                    float by = c[0][1]*(1-u)*(1-v) + c[1][1]*u*(1-v) + c[2][1]*u*v + c[3][1]*(1-u)*v;
-                    float bz = c[0][2]*(1-u)*(1-v) + c[1][2]*u*(1-v) + c[2][2]*u*v + c[3][2]*(1-u)*v;
-                    int dv = base + gi * N + gj;
-                    if (dv < (int)bsp.dispverts.size()) {
-                        const BSPDispVert& dvert = bsp.dispverts[dv];
-                        bx += dvert.vec[0] * dvert.dist;
-                        by += dvert.vec[1] * dvert.dist;
-                        bz += dvert.vec[2] * dvert.dist;
+            const std::string& matname = bsp.texnames[nameID];
+            if (f.dispInfo < 0 && !keep_tools && is_tool_material(matname)) continue;
+
+            Face face;
+            face.material = matname;
+
+            for (int e = 0; e < f.numedges; ++e) {
+                int32_t se = bsp.surfedges[f.firstedge + e];
+                uint16_t vi = (se >= 0) ? bsp.edges[se].v[0] : bsp.edges[-se].v[1];
+                if (vi >= bsp.vertices.size()) continue;
+                const BSPVertex& v = bsp.vertices[vi];
+                face.verts.push_back({v.x, v.y, v.z});
+            }
+
+            if (face.verts.size() < 3) continue;
+
+            if (f.dispInfo >= 0) {
+                if (f.dispInfo >= (int)bsp.dispinfos.size()) continue;
+                if (face.verts.size() != 4) continue;
+                const BSPDispInfo& di = bsp.dispinfos[f.dispInfo];
+
+                int start_idx = 0;
+                float best = std::numeric_limits<float>::max();
+                for (int k = 0; k < 4; ++k) {
+                    float dx = face.verts[k][0] - di.startPosition[0];
+                    float dy = face.verts[k][1] - di.startPosition[1];
+                    float dz = face.verts[k][2] - di.startPosition[2];
+                    float d = dx*dx + dy*dy + dz*dz;
+                    if (d < best) { best = d; start_idx = k; }
+                }
+
+                std::array<std::array<float,3>,4> c;
+                for (int k = 0; k < 4; ++k)
+                    c[k] = face.verts[(start_idx + k) % 4];
+
+                int N = (1 << di.power) + 1;
+                int base = di.dispVertStart;
+
+                std::vector<std::array<float,3>> grid(N * N);
+                for (int gi = 0; gi < N; ++gi) {
+                    float v = (N > 1) ? (float)gi / (N - 1) : 0.0f;
+                    for (int gj = 0; gj < N; ++gj) {
+                        float u = (N > 1) ? (float)gj / (N - 1) : 0.0f;
+                        float bx = c[0][0]*(1-u)*(1-v) + c[1][0]*u*(1-v) + c[2][0]*u*v + c[3][0]*(1-u)*v;
+                        float by = c[0][1]*(1-u)*(1-v) + c[1][1]*u*(1-v) + c[2][1]*u*v + c[3][1]*(1-u)*v;
+                        float bz = c[0][2]*(1-u)*(1-v) + c[1][2]*u*(1-v) + c[2][2]*u*v + c[3][2]*(1-u)*v;
+                        int dv = base + gi * N + gj;
+                        if (dv < (int)bsp.dispverts.size()) {
+                            const BSPDispVert& dvert = bsp.dispverts[dv];
+                            bx += dvert.vec[0] * dvert.dist;
+                            by += dvert.vec[1] * dvert.dist;
+                            bz += dvert.vec[2] * dvert.dist;
+                        }
+                        grid[gi * N + gj] = {bx, by, bz};
                     }
-                    grid[gi * N + gj] = {bx, by, bz};
                 }
+
+                for (int gi = 0; gi < N - 1; ++gi) {
+                    for (int gj = 0; gj < N - 1; ++gj) {
+                        auto A = grid[gi * N + gj];
+                        auto B = grid[gi * N + gj + 1];
+                        auto C = grid[(gi+1) * N + gj + 1];
+                        auto D = grid[(gi+1) * N + gj];
+                        Face t1, t2;
+                        t1.material = matname; t1.verts = {A, B, C};
+                        t2.material = matname; t2.verts = {A, C, D};
+                        sub.push_back(std::move(t1));
+                        sub.push_back(std::move(t2));
+                    }
+                }
+                continue;
             }
 
-            for (int gi = 0; gi < N - 1; ++gi) {
-                for (int gj = 0; gj < N - 1; ++gj) {
-                    auto A = grid[gi * N + gj];
-                    auto B = grid[gi * N + gj + 1];
-                    auto C = grid[(gi+1) * N + gj + 1];
-                    auto D = grid[(gi+1) * N + gj];
-                    Face t1, t2;
-                    t1.material = matname; t1.verts = {A, B, C};
-                    t2.material = matname; t2.verts = {A, C, D};
-                    out.push_back(std::move(t1));
-                    out.push_back(std::move(t2));
-                }
-            }
-            continue;
+            sub.push_back(std::move(face));
         }
+        return sub;
+    };
 
-        out.push_back(std::move(face));
+    std::vector<std::future<std::vector<Face>>> futures;
+    futures.reserve(hc);
+    for (unsigned int t = 0; t < hc; ++t) {
+        size_t lo = t * chunk_size;
+        size_t hi = std::min(lo + chunk_size, total);
+        if (lo >= hi) break;
+        futures.push_back(std::async(std::launch::async, process_range, lo, hi));
     }
 
+    std::vector<Face> out;
+    for (auto& fut : futures) {
+        auto sub = fut.get();
+        out.insert(out.end(), std::make_move_iterator(sub.begin()), std::make_move_iterator(sub.end()));
+    }
     return out;
 }
 

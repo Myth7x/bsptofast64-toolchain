@@ -161,9 +161,14 @@ def main():
     vtf_files, vmt_files = unpack_pak.extract_pak(str(bsp), str(tex_dir))
     _res = cfg["texture_resolution_limit"]
     max_size = "0" if _res == "auto" else str(int(_res))
-    for vtf in vtf_files:
-        png = str(Path(vtf).with_suffix(".png"))
-        subprocess.run([str(vtf2png_bin), vtf, png, max_size], check=True)
+    if vtf_files:
+        list_file = out / "vtf_list.txt"
+        with open(list_file, "w") as lf:
+            lf.write(max_size + "\n")
+            for vtf in vtf_files:
+                lf.write(vtf + "\n")
+                lf.write(str(Path(vtf).with_suffix(".png")) + "\n")
+        subprocess.run([str(vtf2png_bin), "@", str(list_file)], check=True)
     materials_json = None
     if vmt_files:
         print(f"  Parsing {len(vmt_files)} VMT material files...")
