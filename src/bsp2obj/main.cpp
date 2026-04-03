@@ -10,6 +10,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <regex>
 #include <set>
@@ -189,9 +190,15 @@ static void write_obj(const std::vector<Face>& faces,
     if (!obj) throw std::runtime_error("Cannot write OBJ: " + obj_path);
     if (!mtl) throw std::runtime_error("Cannot write MTL: " + mtl_path);
 
+    std::vector<size_t> order(faces.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        return mat_to_obj_name(faces[a].material) < mat_to_obj_name(faces[b].material);
+    });
+
     std::set<std::string> seen;
-    for (const auto& f : faces) {
-        std::string n = mat_to_obj_name(f.material);
+    for (size_t idx : order) {
+        std::string n = mat_to_obj_name(faces[idx].material);
         if (seen.insert(n).second) {
             mtl << "newmtl " << n << "\n\n";
         }
@@ -199,8 +206,8 @@ static void write_obj(const std::vector<Face>& faces,
 
     obj << "mtllib " << mtl_basename << "\n\n";
 
-    for (const auto& f : faces) {
-        for (const auto& v : f.verts) {
+    for (size_t idx : order) {
+        for (const auto& v : faces[idx].verts) {
             obj << "v " << v[0] * scale
                 << " "  << v[2] * scale
                 << " "  << -v[1] * scale << "\n";
@@ -208,9 +215,16 @@ static void write_obj(const std::vector<Face>& faces,
     }
     obj << "\nvt 0 0\n\n";
 
+    std::string cur_mat;
     size_t vi = 1;
-    for (const auto& f : faces) {
-        obj << "usemtl " << mat_to_obj_name(f.material) << "\n";
+    for (size_t idx : order) {
+        const auto& f = faces[idx];
+        std::string mat = mat_to_obj_name(f.material);
+        if (mat != cur_mat) {
+            obj << "o " << mat << "\n";
+            obj << "usemtl " << mat << "\n";
+            cur_mat = mat;
+        }
         size_t n = f.verts.size();
         for (size_t t = 1; t < n - 1; ++t) {
             const auto& A = f.verts[0];
@@ -223,8 +237,8 @@ static void write_obj(const std::vector<Face>& faces,
             float nz = bax*cay - bay*cax;
             if (nx*nx + ny*ny + nz*nz < 1e-6f) continue;
             obj << "f " << vi       << "/1"
-                << " "  << vi + t   << "/1"
-                << " "  << vi + t+1 << "/1\n";
+                << " "  << vi + t+1 << "/1"
+                << " "  << vi + t   << "/1\n";
         }
         vi += n;
     }
