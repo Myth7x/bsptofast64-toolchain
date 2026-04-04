@@ -112,4 +112,26 @@ def read_env(bsp_path):
     if fog_result is not None:
         light_result["fog"] = fog_result
 
+    sky_cam_result = None
+    for block in blocks:
+        if '"classname" "sky_camera"' in block:
+            def get_sc(key, default=""):
+                m = re.search(r'"' + re.escape(key) + r'"\s+"([^"]*)"', block, re.IGNORECASE)
+                return m.group(1).strip() if m else default
+            origin_str = get_sc("origin", "0 0 0")
+            scale_str  = get_sc("scale", "16")
+            try:
+                ox, oy, oz = [float(v) for v in origin_str.split()]
+            except ValueError:
+                ox, oy, oz = 0.0, 0.0, 0.0
+            try:
+                sky_scale = float(scale_str)
+            except ValueError:
+                sky_scale = 16.0
+            sky_cam_result = {"origin": [ox, oy, oz], "scale": sky_scale}
+            break
+
+    if sky_cam_result is not None:
+        light_result["sky_camera"] = sky_cam_result
+
     return light_result

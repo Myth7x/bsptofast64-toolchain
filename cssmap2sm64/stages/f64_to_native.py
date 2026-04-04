@@ -97,14 +97,21 @@ def _write_leveldata(dst: Path, level_name: str, has_lighting: bool = False) -> 
 def _scale_collision(src: Path, dst: Path, divisor: int) -> None:
     text = src.read_text(encoding="utf-8")
     def _scale_vertex(m: re.Match) -> str:
-        x = round(int(m.group(1)) / divisor)
-        y = round(int(m.group(2)) / divisor)
-        z = round(int(m.group(3)) / divisor)
+        x = max(-32768, min(32767, round(int(m.group(1)) / divisor)))
+        y = max(-32768, min(32767, round(int(m.group(2)) / divisor)))
+        z = max(-32768, min(32767, round(int(m.group(3)) / divisor)))
         return f"COL_VERTEX({x}, {y}, {z})"
+    def _scale_water_box(m: re.Match) -> str:
+        idx = m.group(1)
+        vals = [max(-32768, min(32767, round(int(v.strip()) / divisor))) for v in m.group(2).split(',')]
+        return f"COL_WATER_BOX({idx}, {vals[0]}, {vals[1]}, {vals[2]}, {vals[3]}, {vals[4]})"
     result = re.sub(
         r'COL_VERTEX\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\)',
-        _scale_vertex,
-        text,
+        _scale_vertex, text,
+    )
+    result = re.sub(
+        r'COL_WATER_BOX\(\s*(0x[0-9a-fA-F]+|\d+)\s*,\s*(-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+)\s*\)',
+        _scale_water_box, result,
     )
     dst.write_text(result, encoding="utf-8")
 
@@ -196,6 +203,86 @@ def _write_level_yaml(dst: Path, level_name: str, skybox_bin: str = "water") -> 
     dst.write_text(content, encoding="utf-8")
 
 
+def _split_large_collision_blocks(path: Path, max_verts: int = 32767) -> None:
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r'COL_VERTEX_INIT\((\d+)\)', text)
+    if not m or int(m.group(1)) <= max_verts:
+        return
+
+    decl_m = re.search(r'(const Collision \w+\[\] = \{)', text)
+    if not decl_m:
+        return
+
+    preamble = text[:decl_m.start()]
+    decl = decl_m.group(1)
+
+    vertices = [(int(x), int(y), int(z)) for x, y, z in
+                re.findall(r'COL_VERTEX\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\)', text)]
+
+    tri_groups = []
+    for tm in re.finditer(r'COL_TRI_INIT\((\w+)\s*,\s*\d+\)', text):
+        surf_type = tm.group(1)
+        after = text[tm.end():]
+        stop_m = re.search(r'COL_TRI_STOP\s*\(\s*\)|COL_TRI_INIT\s*\(', after)
+        chunk = after[:stop_m.start()] if stop_m else after
+        tris = [(int(a), int(b), int(c)) for a, b, c in
+                re.findall(r'COL_TRI\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', chunk)]
+        tri_groups.append((surf_type, tris))
+
+    specials_m = re.search(
+        r'(COL_SPECIAL_INIT\(.*?\)(?:.*?\n)*?.*?(?=\s*COL_WATER_BOX|\s*COL_END))',
+        text, re.DOTALL)
+    water_m = re.search(
+        r'(COL_WATER_BOX_INIT\(.*?\)(?:.*?\n)*?.*?(?=\s*COL_END))',
+        text, re.DOTALL)
+
+    all_tris = [(st, tri) for st, tris in tri_groups for tri in tris]
+
+    blocks = []
+    cur_vmap: dict = {}
+    cur_verts: list = []
+    cur_tris_by_type: dict = {}
+
+    for surf_type, (g0, g1, g2) in all_tris:
+        needed = sum(1 for v in (g0, g1, g2) if v not in cur_vmap)
+        if len(cur_verts) + needed > max_verts:
+            if cur_verts:
+                blocks.append((list(cur_verts), dict(cur_tris_by_type)))
+            cur_vmap = {}
+            cur_verts = []
+            cur_tris_by_type = {}
+        local = []
+        for v in (g0, g1, g2):
+            if v not in cur_vmap:
+                cur_vmap[v] = len(cur_verts)
+                cur_verts.append(vertices[v])
+            local.append(cur_vmap[v])
+        cur_tris_by_type.setdefault(surf_type, []).append(tuple(local))
+
+    if cur_verts:
+        blocks.append((list(cur_verts), dict(cur_tris_by_type)))
+
+    out = preamble + decl + "\n"
+    for verts, tris_by_type in blocks:
+        out += "\tCOL_INIT(),\n"
+        out += f"\tCOL_VERTEX_INIT({len(verts)}),\n"
+        for x, y, z in verts:
+            out += f"\tCOL_VERTEX({x}, {y}, {z}),\n"
+        for surf_type, tris in tris_by_type.items():
+            out += f"\tCOL_TRI_INIT({surf_type}, {len(tris)}),\n"
+            for v1, v2, v3 in tris:
+                out += f"\tCOL_TRI({v1}, {v2}, {v3}),\n"
+        out += "\tCOL_TRI_STOP(),\n"
+
+    if specials_m:
+        out += "\t" + specials_m.group(1).strip() + "\n"
+    if water_m:
+        out += "\t" + water_m.group(1).strip() + "\n"
+
+    out += "\tCOL_END()\n};\n"
+    path.write_text(out, encoding="utf-8")
+
+
 def convert(
     fast64_dir: Path,
     out_dir: Path,
@@ -221,6 +308,7 @@ def convert(
         areas1 / "collision.inc.c",
         collision_divisor,
     )
+    _split_large_collision_blocks(areas1 / "collision.inc.c")
     for fname in ("geo.inc.c", "macro.inc.c"):
         shutil.copy2(fast64_dir / "area_1" / fname, areas1 / fname)
 
@@ -249,3 +337,115 @@ def convert(
     _write_level_yaml(out_dir / "level.yaml", level_name, skybox_bin)
 
     (out_dir / "texture.inc.c").write_text("", encoding="utf-8")
+
+
+def convert_sky(
+    f64_sky_dir: Path,
+    dst_sky_dir: Path,
+    level_name: str,
+    sky_origin: list,
+    sky_scale: float,
+    scale_factor: float = 1.0,
+    blender_to_sm64_scale: float = 300.0,
+    collision_divisor: float = 150.0,
+) -> None:
+    """Convert Fast64 sky-level output to native SM64-port sky files.
+
+    Writes sky_model.inc.c, sky_camera.inc.h, and sky_geo.inc.c into
+    *dst_sky_dir*, then patches the sibling leveldata.c / script.c to
+    include / call the sky init function.
+    """
+    f64_sky_dir = Path(f64_sky_dir)
+    dst_sky_dir = Path(dst_sky_dir)
+    native_out = dst_sky_dir.parent  # contains the main level's leveldata.c/script.c
+
+    dst_sky_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Fix model UVs and write sky_model.inc.c
+    model_src = f64_sky_dir / "model.inc.c"
+    if not model_src.exists():
+        model_src = f64_sky_dir / "area_2" / "1" / "model.inc.c"
+    if model_src.exists():
+        _fix_model_uvs(model_src, dst_sky_dir / "sky_model.inc.c")
+    else:
+        (dst_sky_dir / "sky_model.inc.c").write_text("", encoding="utf-8")
+
+    # 2. Parse display list names from Fast64 sky geo.inc.c
+    geo_src = f64_sky_dir / "area_2" / "geo.inc.c"
+    dl_names: list = []
+    if geo_src.exists():
+        geo_text = geo_src.read_text(encoding="utf-8")
+        dl_names = re.findall(
+            r'GEO_DISPLAY_LIST\(\s*\w+\s*,\s*(\w+)\s*\)', geo_text
+        )
+
+    # 3. Compute SM64 sky origin (Source world coords → SM64 units)
+    ox, oy, oz = sky_origin
+    net = blender_to_sm64_scale / collision_divisor
+    sm64_x = round(ox * scale_factor * net)
+    sm64_y = round(oz * scale_factor * net)   # Source Z → SM64 Y
+    sm64_z = round(-oy * scale_factor * net)  # Source Y (negated) → SM64 Z
+
+    # 4. Write sky_camera.inc.h
+    guard = f"SKY3D_CAMERA_{level_name.upper()}_H"
+    cam_h = (
+        f"#ifndef {guard}\n"
+        f"#define {guard}\n\n"
+        f"#define SKY3D_ORIGIN_X {sm64_x}\n"
+        f"#define SKY3D_ORIGIN_Y {sm64_y}\n"
+        f"#define SKY3D_ORIGIN_Z {sm64_z}\n"
+        f"#define SKY3D_SCALE    {int(sky_scale)}\n\n"
+        f"#ifndef __ASSEMBLER__\n"
+        f"#include <PR/gbi.h>\n"
+        f"extern Gfx sky3d_display_list[];\n"
+        f"#endif\n\n"
+        f"#endif /* {guard} */\n"
+    )
+    (dst_sky_dir / "sky_camera.inc.h").write_text(cam_h, encoding="utf-8")
+
+    # 5. Write sky_geo.inc.c
+    geo_lines = [
+        f'#include "levels/{level_name}/sky/sky_model.inc.c"',
+        f'#include "levels/{level_name}/sky/sky_camera.inc.h"',
+        "",
+        "/* forward declaration — defined in src/game/skybox3d.c */",
+        "void sky3d_register(Gfx *dl, s32 ox, s32 oy, s32 oz, s32 scale);",
+        "",
+        "Gfx sky3d_display_list[] = {",
+    ]
+    for dl in dl_names:
+        geo_lines.append(f"    gsSPDisplayList({dl}),")
+    geo_lines += [
+        "    gsDPNoOpTag(0x534B5944u),  /* sky depth-clear marker (SKYD) */",
+        "    gsSPEndDisplayList(),",
+        "};",
+        "",
+        f"static s32 {level_name}_sky_init(UNUSED s16 arg, UNUSED s32 unused) {{",
+        f"    sky3d_register(sky3d_display_list,"
+        f" SKY3D_ORIGIN_X, SKY3D_ORIGIN_Y, SKY3D_ORIGIN_Z, SKY3D_SCALE);",
+        "    return 0;",
+        "}",
+        "",
+    ]
+    (dst_sky_dir / "sky_geo.inc.c").write_text("\n".join(geo_lines), encoding="utf-8")
+
+    # 6. Append sky include to native leveldata.c
+    ld_path = native_out / "leveldata.c"
+    if ld_path.exists():
+        ld_text = ld_path.read_text(encoding="utf-8")
+        sky_include = f'#include "levels/{level_name}/sky/sky_geo.inc.c"\n'
+        if sky_include not in ld_text:
+            ld_path.write_text(ld_text + sky_include, encoding="utf-8")
+
+    # 7. Inject sky_init CALL into native script.c before lvl_init_or_update
+    sc_path = native_out / "script.c"
+    if sc_path.exists():
+        sc_text = sc_path.read_text(encoding="utf-8")
+        sky_call = f"    CALL(0, {level_name}_sky_init),\n"
+        if sky_call not in sc_text:
+            sc_text = re.sub(
+                r'(\s*CALL\s*\(\s*0\s*,\s*lvl_init_or_update\s*\))',
+                "\n" + sky_call.rstrip("\n") + r'\1',
+                sc_text,
+            )
+            sc_path.write_text(sc_text, encoding="utf-8")

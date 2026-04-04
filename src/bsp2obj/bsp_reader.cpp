@@ -20,10 +20,15 @@ static std::vector<uint8_t> read_file_bytes(const std::string& path) {
 
 template<typename T>
 static std::vector<T> lump_as(const std::vector<uint8_t>& data, const BSPLump& lump) {
-    size_t count = static_cast<size_t>(lump.filelen) / sizeof(T);
+    if (lump.fileofs < 0 || lump.filelen <= 0) return {};
+    size_t ofs = static_cast<size_t>(lump.fileofs);
+    size_t len = static_cast<size_t>(lump.filelen);
+    if (ofs >= data.size()) return {};
+    len = std::min(len, data.size() - ofs);
+    size_t count = len / sizeof(T);
     std::vector<T> out(count);
     if (count > 0)
-        std::memcpy(out.data(), data.data() + lump.fileofs, count * sizeof(T));
+        std::memcpy(out.data(), data.data() + ofs, count * sizeof(T));
     return out;
 }
 
@@ -56,22 +61,33 @@ BSPData load_bsp(const std::string& path) {
 
     {
         const auto& el = hdr.lumps[LUMP_ENTITIES];
-        bsp.entities.assign(
-            reinterpret_cast<const char*>(data.data() + el.fileofs),
-            static_cast<size_t>(el.filelen)
-        );
+        if (el.fileofs >= 0 && el.filelen > 0) {
+            size_t ofs = static_cast<size_t>(el.fileofs);
+            size_t len = static_cast<size_t>(el.filelen);
+            if (ofs < data.size()) {
+                len = std::min(len, data.size() - ofs);
+                bsp.entities.assign(
+                    reinterpret_cast<const char*>(data.data() + ofs), len);
+            }
+        }
     }
 
     {
         const auto& tbl = hdr.lumps[LUMP_TEXDATA_STRING_TABLE];
         const auto& dat = hdr.lumps[LUMP_TEXDATA_STRING_DATA];
-        size_t n = static_cast<size_t>(tbl.filelen) / sizeof(int32_t);
+        size_t n = (tbl.fileofs >= 0 && tbl.filelen > 0)
+            ? static_cast<size_t>(tbl.filelen) / sizeof(int32_t) : 0;
         bsp.texnames.resize(n);
         for (size_t i = 0; i < n; ++i) {
+            size_t tbl_ofs = static_cast<size_t>(tbl.fileofs) + i * 4;
+            if (tbl_ofs + 4 > data.size()) { bsp.texnames[i] = ""; continue; }
             int32_t off;
-            std::memcpy(&off, data.data() + tbl.fileofs + i * 4, 4);
-            const char* s = reinterpret_cast<const char*>(data.data() + dat.fileofs + off);
-            bsp.texnames[i] = s;
+            std::memcpy(&off, data.data() + tbl_ofs, 4);
+            if (off < 0 || dat.fileofs < 0) { bsp.texnames[i] = ""; continue; }
+            size_t str_ofs = static_cast<size_t>(dat.fileofs) + static_cast<size_t>(off);
+            if (str_ofs >= data.size()) { bsp.texnames[i] = ""; continue; }
+            const char* s = reinterpret_cast<const char*>(data.data() + str_ofs);
+            bsp.texnames[i] = std::string(s, strnlen(s, data.size() - str_ofs));
         }
     }
 
@@ -115,6 +131,7 @@ BSPData load_bsp(const std::string& path) {
                 std::memcpy(&nameCount, sp, 4);
                 sp += 4;
 
+                if (nameCount < 0 || nameCount > 65536) break;
                 std::vector<std::string> names;
                 names.reserve(static_cast<size_t>(nameCount));
                 for (int32_t ni = 0; ni < nameCount; ++ni) {
@@ -130,7 +147,9 @@ BSPData load_bsp(const std::string& path) {
                 std::memcpy(&leafCount, sp, 4);
                 sp += 4;
 
+                if (leafCount < 0) break;
                 size_t leaf_stride = (gl_version >= 12) ? 4u : 2u;
+                if (static_cast<size_t>(leafCount) * leaf_stride > static_cast<size_t>(sp_end - sp)) break;
                 sp += static_cast<size_t>(leafCount) * leaf_stride;
 
                 if (sp + 4 > sp_end) break;
@@ -141,6 +160,8 @@ BSPData load_bsp(const std::string& path) {
                 if (propCount <= 0) break;
 
                 ptrdiff_t prop_bytes = sp_end - sp;
+                if (prop_bytes <= 0) break;
+                if (propCount > 1000000) break;
                 if (prop_bytes < static_cast<ptrdiff_t>(56) * propCount) break;
 
                 size_t struct_size = static_cast<size_t>(prop_bytes) / static_cast<size_t>(propCount);

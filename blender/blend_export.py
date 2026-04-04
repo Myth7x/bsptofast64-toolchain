@@ -98,6 +98,8 @@ def main():
     parser.add_argument("--props-json", default=None)
     parser.add_argument("--bsp-scale", type=float, default=1.0)
     parser.add_argument("--env-json", default=None)
+    parser.add_argument("--sky-obj", default=None)
+    parser.add_argument("--sky-camera-json", default=None)
     args = parser.parse_args(argv)
 
     mat_props = {}
@@ -176,6 +178,14 @@ def main():
     if not imported:
         imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]
     print(f"== blend_export: imported {len(imported)} mesh objects", flush=True)
+
+    import mathutils
+    for _imp in imported:
+        _rot = _imp.rotation_euler.to_matrix().to_4x4()
+        _imp.data.transform(_rot)
+        _imp.data.update()
+        _imp.rotation_euler = (0.0, 0.0, 0.0)
+    print(f"== blend_export: applied import rotation to vertex positions", flush=True)
 
     import bmesh as _bmesh_weld
     for _wobj in imported:
@@ -415,64 +425,152 @@ def main():
     ce.custom_level_name = args.level_name
     ce.custom_level_path = str(out_dir)
 
-    import math as _math
-    import fast64.fast64_internal.f3d.f3d_writer as _f3d_writer
-    _orig_getInfoDict = _f3d_writer.getInfoDict
-    _orig_saveOrGetF3DMaterial = _f3d_writer.saveOrGetF3DMaterial
-    _export_total = [0]
-    _export_done = [0]
-    _export_t0 = [0.0]
-    _export_total[0] = sum(
-        1 for o in bpy.data.objects if o.type == "MESH" and o.visible_get()
-    )
-    _export_t0[0] = _time.monotonic()
-    _mat_write_done = [0]
-    _mat_write_t0 = [_time.monotonic()]
-    def _getInfoDict_logged(obj):
-        _export_done[0] += 1
-        obj.data.calc_loop_triangles()
-        nf = len(obj.data.loop_triangles)
-        _el = _time.monotonic() - _export_t0[0]
-        _tot = _export_total[0]
-        _dn = _export_done[0]
-        _pct = _dn / _tot * 100 if _tot else 100
-        _eta = (_el / _dn * (_tot - _dn)) if _dn else 0
-        print(
-            f"== f3d export [{_dn}/{_tot} {_pct:.0f}% +{_el:.1f}s eta {_eta:.0f}s]"
-            f" {obj.name} ({nf} tris)",
-            flush=True,
-        )
-        _mat_write_done[0] = 0
-        _mat_write_t0[0] = _time.monotonic()
-        return _orig_getInfoDict(obj)
-    def _saveOrGetF3DMaterial_logged(material, fModel, obj, drawLayer, convertTextureData):
-        _mat_write_done[0] += 1
-        _dn = _mat_write_done[0]
-        _el = _time.monotonic() - _mat_write_t0[0]
-        _rate = _dn / _el if _el > 0 else 0
-        d = obj.dimensions
-        loc = obj.location
-        rot = obj.rotation_euler
-        nf = len(obj.data.loop_triangles)
-        print(
-            f"  Writing material [{_dn} +{_el:.1f}s {_rate:.1f}/s] {material.name}"
-            f" | layer={drawLayer}"
-            f" | tris={nf}"
-            f" | dim=({d.x:.1f},{d.y:.1f},{d.z:.1f})"
-            f" | loc=({loc.x:.1f},{loc.y:.1f},{loc.z:.1f})"
-            f" | rot=({_math.degrees(rot.x):.0f},{_math.degrees(rot.y):.0f},{_math.degrees(rot.z):.0f})°",
-            flush=True,
-        )
-        return _orig_saveOrGetF3DMaterial(material, fModel, obj, drawLayer, convertTextureData)
-    _f3d_writer.getInfoDict = _getInfoDict_logged
-    _f3d_writer.saveOrGetF3DMaterial = _saveOrGetF3DMaterial_logged
-
     bpy.context.view_layer.objects.active = level_root
     level_root.select_set(True)
     print("== blend_export: calling sm64_export_level", flush=True)
     bpy.ops.object.sm64_export_level()
-    _f3d_writer.getInfoDict = _orig_getInfoDict
-    _f3d_writer.saveOrGetF3DMaterial = _orig_saveOrGetF3DMaterial
+    print("== blend_export: main level done", flush=True)
+
+    if args.sky_obj and Path(args.sky_obj).exists():
+        print("== blend_export: starting sky export", flush=True)
+
+        sky_scene = bpy.data.scenes.new("sky_export_scene")
+        bpy.context.window.scene = sky_scene
+        sky_scene.f3d_type = "F3DEX2/LX2"
+        sky_scene.display_settings.display_device = "sRGB"
+        sky_scene.view_settings.view_transform = "Standard"
+        sky_scene.view_settings.look = "None"
+        sky_scene.view_settings.exposure = 0.0
+        sky_scene.view_settings.gamma = 1.0
+
+        _sky_before = set(bpy.data.objects)
+        if blender_ver >= (3, 3, 0):
+            bpy.ops.wm.obj_import(filepath=args.sky_obj, forward_axis='NEGATIVE_Z', up_axis='Y')
+        else:
+            bpy.ops.import_scene.obj(filepath=args.sky_obj, axis_forward='-Z', axis_up='Y')
+
+        sky_imported = [o for o in bpy.data.objects if o not in _sky_before and o.type == "MESH"]
+        print(f"== blend_export: sky imported {len(sky_imported)} mesh objects", flush=True)
+
+        for _simp in sky_imported:
+            _srot = _simp.rotation_euler.to_matrix().to_4x4()
+            _simp.data.transform(_srot)
+            _simp.data.update()
+            _simp.rotation_euler = (0.0, 0.0, 0.0)
+
+        import bmesh as _sky_bmesh
+        for _swobj in sky_imported:
+            _swbm = _sky_bmesh.new()
+            _swbm.from_mesh(_swobj.data)
+            _sky_bmesh.ops.remove_doubles(_swbm, verts=_swbm.verts, dist=0.001)
+            _swbm.to_mesh(_swobj.data)
+            _swbm.free()
+            _swobj.data.update()
+
+        sky_mat_cache = {}
+        for _sobj in sky_imported:
+            for _sslot in _sobj.material_slots:
+                _sold = _sslot.material
+                if _sold is None:
+                    continue
+                _smn = _sold.name
+                if _smn in sky_mat_cache:
+                    _sslot.material = sky_mat_cache[_smn]
+                    continue
+                _spng = find_png_for_material(args.textures, _smn, mat_props, underscore_to_slash)
+                _spreset = "Shaded Texture" if _spng else "Shaded Solid"
+                _snew = createF3DMat(None, _spreset)
+                _snew.name = _smn
+                if _env and _sun_light_data is not None:
+                    _amb_r2, _amb_g2, _amb_b2 = _env["ambient_color"]
+                    _snew.f3d_mat.use_default_lighting = False
+                    _snew.f3d_mat.set_ambient_from_light = False
+                    _snew.f3d_mat.ambient_light_color = (_amb_r2, _amb_g2, _amb_b2, 1.0)
+                    _snew.f3d_mat.f3d_light1 = _sun_light_data
+                if _spng:
+                    import math as _simath
+                    _simg = bpy.data.images.load(_spng, check_existing=True)
+                    _snew.f3d_mat.tex0.tex_set = True
+                    _snew.f3d_mat.tex0.tex = _simg
+                    _snew.f3d_mat.tex0.tex_format = "RGBA16"
+                    _siw, _sih = int(_simg.size[0]), int(_simg.size[1])
+                    if _siw > 0 and _sih > 0 and _snew.f3d_mat.tex0.autoprop:
+                        def _slog2up(n):
+                            return max(1, int(_simath.ceil(_simath.log2(n))))
+                        _snew.f3d_mat.tex0.S.mask = _slog2up(_siw)
+                        _snew.f3d_mat.tex0.S.shift = 0
+                        _snew.f3d_mat.tex0.S.low = 0.0
+                        _snew.f3d_mat.tex0.S.high = float(_siw - 1)
+                        _snew.f3d_mat.tex0.T.mask = _slog2up(_sih)
+                        _snew.f3d_mat.tex0.T.shift = 0
+                        _snew.f3d_mat.tex0.T.low = 0.0
+                        _snew.f3d_mat.tex0.T.high = float(_sih - 1)
+                _sslot.material = _snew
+                sky_mat_cache[_smn] = _snew
+
+        for _sm in sky_mat_cache.values():
+            _sm.collision_type_simple = "SURFACE_DEFAULT"
+
+        import math as _sdmath
+        import bmesh as _sdbmesh
+        sky_surviving = []
+        for _sobj in sky_imported:
+            if len(_sobj.data.polygons) == 0:
+                sky_surviving.append(_sobj)
+                continue
+            bpy.context.view_layer.objects.active = _sobj
+            _sbm = _sdbmesh.new()
+            _sbm.from_mesh(_sobj.data)
+            _sdbmesh.ops.remove_doubles(_sbm, verts=_sbm.verts, dist=0.01)
+            _sbm.to_mesh(_sobj.data)
+            _sbm.free()
+            _sobj.data.update()
+            _smod = _sobj.modifiers.new(name="SkyDissolve", type="DECIMATE")
+            _smod.decimate_type = "DISSOLVE"
+            _smod.angle_limit = _sdmath.radians(1.0)
+            bpy.ops.object.modifier_apply(modifier=_smod.name)
+            if len(_sobj.data.polygons) == 0:
+                bpy.data.objects.remove(_sobj, do_unlink=True)
+                continue
+            sky_surviving.append(_sobj)
+        sky_imported = sky_surviving
+
+        sky_level_name = args.level_name + "_sky"
+        sky_level_root = bpy.data.objects.new("Sky Level Root", None)
+        sky_scene.collection.objects.link(sky_level_root)
+        sky_level_root.sm64_obj_type = "Level Root"
+        sky_level_root.useBackgroundColor = False
+        sky_level_root.background = args.background_sky
+
+        sky_area_root = bpy.data.objects.new("Sky Area Root", None)
+        sky_scene.collection.objects.link(sky_area_root)
+        sky_area_root.sm64_obj_type = "Area Root"
+        sky_area_root.areaIndex = 2
+        sky_area_root.parent = sky_level_root
+
+        for _sobj in sky_imported:
+            _sobj.parent = sky_area_root
+
+        sky_out_dir = Path(args.output).resolve() / sky_level_name
+        sky_out_dir.mkdir(parents=True, exist_ok=True)
+
+        sky_sm64 = sky_scene.fast64.sm64
+        sky_sm64.export_type = "C"
+        sky_sm64.blender_to_sm64_scale = args.scale
+
+        sky_ce = sky_sm64.combined_export
+        sky_ce.non_decomp_level = True
+        sky_ce.custom_level_name = sky_level_name
+        sky_ce.custom_level_path = str(sky_out_dir.parent)
+
+        bpy.context.view_layer.objects.active = sky_level_root
+        sky_level_root.select_set(True)
+        print("== blend_export: calling sm64_export_level for sky", flush=True)
+        bpy.ops.object.sm64_export_level()
+        print("== blend_export: sky level done", flush=True)
+
+        bpy.context.window.scene = scene
+
     print("== blend_export: done", flush=True)
 
 

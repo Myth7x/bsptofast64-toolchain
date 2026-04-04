@@ -120,8 +120,12 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
 
             const BSPTexData& td = bsp.texdatas[ti.texdata];
             for (int e = 0; e < f.numedges; ++e) {
+                if (f.firstedge < 0 || f.firstedge + e >= (int)bsp.surfedges.size()) continue;
                 int32_t se = bsp.surfedges[f.firstedge + e];
-                uint16_t vi = (se >= 0) ? bsp.edges[se].v[0] : bsp.edges[-se].v[1];
+                int64_t ei64 = (se >= 0) ? (int64_t)se : -(int64_t)se;
+                if (ei64 >= (int64_t)bsp.edges.size()) continue;
+                size_t ei = (size_t)ei64;
+                uint16_t vi = (se >= 0) ? bsp.edges[ei].v[0] : bsp.edges[ei].v[1];
                 if (vi >= bsp.vertices.size()) continue;
                 const BSPVertex& v = bsp.vertices[vi];
                 face.verts.push_back({v.x, v.y, v.z});
@@ -149,8 +153,10 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
                 for (int k = 0; k < 4; ++k)
                     c[k] = face.verts[(start_idx + k) % 4];
 
+                if (di.power < 1 || di.power > 4) continue;
                 int N = (1 << di.power) + 1;
                 int base = di.dispVertStart;
+                if (base < 0) continue;
 
                 std::vector<std::array<float,3>> grid(N * N);
                 for (int gi = 0; gi < N; ++gi) {
@@ -161,7 +167,7 @@ static std::vector<Face> extract_faces(const BSPData& bsp, bool keep_tools) {
                         float by = c[0][1]*(1-u)*(1-v) + c[1][1]*u*(1-v) + c[2][1]*u*v + c[3][1]*(1-u)*v;
                         float bz = c[0][2]*(1-u)*(1-v) + c[1][2]*u*(1-v) + c[2][2]*u*v + c[3][2]*(1-u)*v;
                         int dv = base + gi * N + gj;
-                        if (dv < (int)bsp.dispverts.size()) {
+                        if (dv >= 0 && dv < (int)bsp.dispverts.size()) {
                             const BSPDispVert& dvert = bsp.dispverts[dv];
                             bx += dvert.vec[0] * dvert.dist;
                             by += dvert.vec[1] * dvert.dist;
@@ -304,6 +310,130 @@ static void write_props_json(const std::vector<StaticProp>& props, const std::st
     f << "]\n";
 }
 
+struct SkyCamera {
+    float origin[3];
+    float scale;
+};
+
+static std::optional<SkyCamera> find_sky_camera(const std::string& entities) {
+    std::istringstream ss(entities);
+    std::string line;
+    std::string classname;
+    float origin[3]{};
+    float scale = 16.0f;
+    bool in_ent = false, has_class = false, has_origin = false;
+
+    auto trim = [](const std::string& s) {
+        size_t a = s.find_first_not_of(" \t\r\n");
+        size_t b = s.find_last_not_of(" \t\r\n");
+        if (a == std::string::npos) return std::string{};
+        return s.substr(a, b - a + 1);
+    };
+
+    while (std::getline(ss, line)) {
+        std::string tl = trim(line);
+        if (tl == "{") {
+            in_ent = true; has_class = false; has_origin = false;
+            classname.clear(); scale = 16.0f;
+            continue;
+        }
+        if (tl == "}") {
+            if (in_ent && has_class && has_origin)
+                return SkyCamera{{origin[0], origin[1], origin[2]}, scale};
+            in_ent = false;
+            continue;
+        }
+        if (!in_ent) continue;
+        std::regex kv_re("\"([^\"]+)\"\\s+\"([^\"]+)\"");
+        std::smatch m;
+        if (!std::regex_search(tl, m, kv_re)) continue;
+        std::string key = m[1].str(), val = m[2].str();
+        if (key == "classname" && val == "sky_camera") {
+            has_class = true;
+        } else if (key == "origin") {
+            std::istringstream vs(val);
+            if (vs >> origin[0] >> origin[1] >> origin[2]) has_origin = true;
+        } else if (key == "scale") {
+            try { scale = std::stof(val); } catch (...) {}
+        }
+    }
+    return std::nullopt;
+}
+
+static void write_sky_camera_json(const SkyCamera& cam, const std::string& path) {
+    std::ofstream f(path);
+    if (!f) throw std::runtime_error("Cannot write sky camera JSON: " + path);
+    f << "{\"origin\":[" << cam.origin[0] << "," << cam.origin[1] << "," << cam.origin[2]
+      << "],\"scale\":" << cam.scale << "}\n";
+}
+
+static void write_sky_obj(const std::vector<Face>& faces,
+                          const std::string& obj_path,
+                          const std::string& mtl_path,
+                          double scale,
+                          float sky_scale) {
+    std::string mtl_basename = std::filesystem::path(mtl_path).filename().string();
+    std::ofstream obj(obj_path);
+    std::ofstream mtl(mtl_path);
+    if (!obj) throw std::runtime_error("Cannot write sky OBJ: " + obj_path);
+    if (!mtl) throw std::runtime_error("Cannot write sky MTL: " + mtl_path);
+
+    std::vector<size_t> order(faces.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        return mat_to_obj_name(faces[a].material) < mat_to_obj_name(faces[b].material);
+    });
+
+    std::set<std::string> seen;
+    for (size_t idx : order) {
+        std::string n = mat_to_obj_name(faces[idx].material);
+        if (seen.insert(n).second)
+            mtl << "newmtl " << n << "\n\n";
+    }
+
+    obj << "mtllib " << mtl_basename << "\n\n";
+
+    double vs = scale * static_cast<double>(sky_scale);
+    for (size_t idx : order) {
+        for (const auto& v : faces[idx].verts)
+            obj << "v " << v[0]*vs << " " << v[2]*vs << " " << -v[1]*vs << "\n";
+    }
+    obj << "\n";
+    for (size_t idx : order) {
+        for (const auto& uv : faces[idx].uvs)
+            obj << "vt " << uv[0] << " " << uv[1] << "\n";
+    }
+    obj << "\n";
+
+    std::string cur_mat;
+    size_t vi = 1;
+    for (size_t idx : order) {
+        const auto& f = faces[idx];
+        std::string mat = mat_to_obj_name(f.material);
+        if (mat != cur_mat) {
+            obj << "o " << mat << "\n";
+            obj << "usemtl " << mat << "\n";
+            cur_mat = mat;
+        }
+        size_t n = f.verts.size();
+        for (size_t t = 1; t < n - 1; ++t) {
+            const auto& A = f.verts[0];
+            const auto& B = f.verts[t];
+            const auto& C = f.verts[t + 1];
+            float bax = B[0]-A[0], bay = B[1]-A[1], baz = B[2]-A[2];
+            float cax = C[0]-A[0], cay = C[1]-A[1], caz = C[2]-A[2];
+            float nx = bay*caz - baz*cay;
+            float ny = baz*cax - bax*caz;
+            float nz = bax*cay - bay*cax;
+            if (nx*nx + ny*ny + nz*nz < 1e-6f) continue;
+            obj << "f " << vi       << "/" << vi
+                << " "  << vi + t+1 << "/" << vi + t+1
+                << " "  << vi + t   << "/" << vi + t   << "\n";
+        }
+        vi += n;
+    }
+}
+
 static std::optional<std::array<float, 3>> find_spawn(const std::string& entities) {
     static const std::vector<std::string> SPAWN_CLASSES = {
         "info_player_counterterrorist",
@@ -369,7 +499,7 @@ static std::optional<std::array<float, 3>> find_spawn(const std::string& entitie
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: bsp2obj <input.bsp> <output.obj> [--scale F] [--keep-tools] [--spawn-out FILE] [--props-out FILE]\n";
+        std::cerr << "Usage: bsp2obj <input.bsp> <output.obj> [--scale F] [--keep-tools] [--spawn-out FILE] [--props-out FILE] [--skybox-out FILE] [--sky-camera-out FILE] [--sky-radius F]\n";
         return 1;
     }
 
@@ -379,6 +509,9 @@ int main(int argc, char* argv[]) {
     bool keep_tools = false;
     std::string spawn_out;
     std::string props_out;
+    std::string skybox_out;
+    std::string sky_camera_out;
+    float sky_radius = 0.0f;
 
     for (int i = 3; i < argc; ++i) {
         std::string arg = argv[i];
@@ -390,6 +523,12 @@ int main(int argc, char* argv[]) {
             spawn_out = argv[++i];
         } else if (arg == "--props-out" && i + 1 < argc) {
             props_out = argv[++i];
+        } else if (arg == "--skybox-out" && i + 1 < argc) {
+            skybox_out = argv[++i];
+        } else if (arg == "--sky-camera-out" && i + 1 < argc) {
+            sky_camera_out = argv[++i];
+        } else if (arg == "--sky-radius" && i + 1 < argc) {
+            sky_radius = std::stof(argv[++i]);
         }
     }
 
@@ -400,8 +539,65 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error loading BSP: " << e.what() << "\n";
         return 1;
     }
-
     auto faces = extract_faces(bsp, keep_tools);
+
+    if (!skybox_out.empty()) {
+        auto sky_cam = find_sky_camera(bsp.entities);
+        if (sky_cam) {
+            auto spawn = find_spawn(bsp.entities);
+            float radius = sky_radius;
+            if (radius <= 0.0f) {
+                if (spawn) {
+                    float dx = sky_cam->origin[0] - (*spawn)[0];
+                    float dy = sky_cam->origin[1] - (*spawn)[1];
+                    float dz = sky_cam->origin[2] - (*spawn)[2];
+                    radius = std::sqrt(dx*dx + dy*dy + dz*dz) * 0.5f;
+                }
+                if (radius <= 0.0f) radius = 8192.0f;
+            }
+
+            std::vector<Face> sky_faces, main_faces;
+            for (auto& face : faces) {
+                float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+                for (const auto& v : face.verts) { cx += v[0]; cy += v[1]; cz += v[2]; }
+                float n = static_cast<float>(face.verts.size());
+                cx /= n; cy /= n; cz /= n;
+                float ddx = cx - sky_cam->origin[0];
+                float ddy = cy - sky_cam->origin[1];
+                float ddz = cz - sky_cam->origin[2];
+                float d = std::sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
+                if (d <= radius)
+                    sky_faces.push_back(std::move(face));
+                else
+                    main_faces.push_back(std::move(face));
+            }
+            faces = std::move(main_faces);
+
+            if (!sky_faces.empty()) {
+                std::string sky_mtl = std::filesystem::path(skybox_out).replace_extension(".sky.mtl").string();
+                try {
+                    write_sky_obj(sky_faces, skybox_out, sky_mtl, scale, sky_cam->scale);
+                    std::cout << "Sky: " << sky_faces.size() << " faces to " << skybox_out << "\n";
+                } catch (const std::exception& e) {
+                    std::cerr << "Error writing sky OBJ: " << e.what() << "\n";
+                }
+            } else {
+                std::cout << "Sky: sky_camera found but no faces within radius " << radius << "\n";
+            }
+
+            if (!sky_camera_out.empty()) {
+                try {
+                    write_sky_camera_json(*sky_cam, sky_camera_out);
+                    std::cout << "Sky camera: origin=(" << sky_cam->origin[0] << "," << sky_cam->origin[1] << "," << sky_cam->origin[2] << ") scale=" << sky_cam->scale << "\n";
+                } catch (const std::exception& e) {
+                    std::cerr << "Error writing sky camera JSON: " << e.what() << "\n";
+                }
+            }
+        } else {
+            std::cout << "Sky: no sky_camera entity found, skipping skybox export\n";
+        }
+    }
+
     std::string mtl_path = std::filesystem::path(obj_path).replace_extension(".mtl").string();
 
     try {

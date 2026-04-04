@@ -4,7 +4,7 @@ from pathlib import Path
 _SCRIPT = Path(__file__).parent.parent.parent / "blender" / "blend_export.py"
 
 
-def run(blender, obj_path, textures_dir, output_dir, level_name, area_id, scale, spawn=(0.0, 0.0, 0.0), materials_json=None, background="ABOVE_CLOUDS", decimate_ratio=1.0, props_json=None, bsp_scale=1.0, env_json=None):
+def run(blender, obj_path, textures_dir, output_dir, level_name, area_id, scale, spawn=(0.0, 0.0, 0.0), materials_json=None, background="ABOVE_CLOUDS", decimate_ratio=1.0, props_json=None, bsp_scale=1.0, env_json=None, sky_obj=None, sky_camera_json=None):
     cmd = [
         blender,
         "--background",
@@ -27,4 +27,8 @@ def run(blender, obj_path, textures_dir, output_dir, level_name, area_id, scale,
         cmd += ["--props-json", str(props_json)]
     if env_json is not None:
         cmd += ["--env-json", str(env_json)]
+    if sky_obj is not None:
+        cmd += ["--sky-obj", str(sky_obj)]
+    if sky_camera_json is not None:
+        cmd += ["--sky-camera-json", str(sky_camera_json)]
     subprocess.run(cmd, check=True)

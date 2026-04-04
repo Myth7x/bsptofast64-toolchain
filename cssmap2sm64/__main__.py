@@ -1,4 +1,5 @@
 import json
+import lzma
 import os
 import re
 import shutil
@@ -74,6 +75,80 @@ def _require_binary(name):
     return p
 
 
+def _decompress_valve_lzma(lump_bytes: bytes) -> bytes:
+    actual_size = struct.unpack_from("<I", lump_bytes, 4)[0]
+    lzma_size   = struct.unpack_from("<I", lump_bytes, 8)[0]
+    props       = lump_bytes[12:17]
+    payload     = lump_bytes[17 : 17 + lzma_size]
+    lzma_alone  = props + struct.pack("<q", actual_size) + payload
+    return lzma.decompress(lzma_alone, format=lzma.FORMAT_ALONE)
+
+
+_LZMA_DECOMPRESS_LUMPS = {0, 1, 2, 3, 5, 6, 7, 12, 13, 18, 19, 26, 33, 35, 40, 43, 44}
+
+
+def _normalize_bsp(src: Path, dst: Path) -> bool:
+    data = src.read_bytes()
+    HDR = 8 + 64 * 16 + 4
+    if len(data) < HDR:
+        return False
+    lumps = []
+    for i in range(64):
+        o = 8 + i * 16
+        fileofs, filelen, lver = struct.unpack_from("<iii", data, o)
+        fourcc = data[o + 12 : o + 16]
+        lumps.append((fileofs, filelen, lver, fourcc))
+    map_rev = struct.unpack_from("<i", data, 8 + 64 * 16)[0]
+    has_lzma = any(
+        i in _LZMA_DECOMPRESS_LUMPS
+        and 0 < fileofs and 0 < filelen and fileofs + filelen <= len(data)
+        and data[fileofs : fileofs + 4] == b"LZMA"
+        for i, (fileofs, filelen, _, _) in enumerate(lumps)
+    )
+    if not has_lzma:
+        return False
+
+    new_data: list[bytes] = []
+    new_lumps: list[tuple] = []
+    pos = HDR
+    for i, (fileofs, filelen, lver, fourcc) in enumerate(lumps):
+        if fileofs <= 0 or filelen <= 0 or fileofs + filelen > len(data):
+            new_lumps.append((0, 0, lver, fourcc))
+            new_data.append(b"")
+            continue
+        chunk = data[fileofs : fileofs + filelen]
+        if i in _LZMA_DECOMPRESS_LUMPS and chunk[:4] == b"LZMA" and len(chunk) >= 17:
+            try:
+                chunk = _decompress_valve_lzma(chunk)
+            except Exception:
+                pass
+        if i == 35 and len(chunk) >= 4:
+            delta = pos - fileofs
+            chunk = bytearray(chunk)
+            gl_lump_count = struct.unpack_from("<i", chunk, 0)[0]
+            if 0 < gl_lump_count <= 64:
+                for li in range(gl_lump_count):
+                    entry_off = 4 + li * 16
+                    if entry_off + 16 <= len(chunk):
+                        gl_ofs = struct.unpack_from("<i", chunk, entry_off + 8)[0]
+                        struct.pack_into("<i", chunk, entry_off + 8, gl_ofs + delta)
+            chunk = bytes(chunk)
+        pad = (-len(chunk)) & 3
+        new_lumps.append((pos, len(chunk), lver, fourcc))
+        new_data.append(chunk + bytes(pad))
+        pos += len(chunk) + pad
+
+    hdr = bytearray(HDR)
+    struct.pack_into("<ii", hdr, 0, *struct.unpack_from("<ii", data, 0))
+    for i, (fileofs, filelen, lver, fourcc) in enumerate(new_lumps):
+        o = 8 + i * 16
+        struct.pack_into("<iii", hdr, o, fileofs, filelen, lver)
+        hdr[o + 12 : o + 16] = fourcc
+    struct.pack_into("<i", hdr, 8 + 64 * 16, map_rev)
+    dst.write_bytes(bytes(hdr) + b"".join(new_data))
+    return True
+
+
 def main():
     args = build_parser().parse_args()
 
@@ -96,6 +171,7 @@ def main():
     cfg.setdefault("default_background", "ABOVE_CLOUDS")
     cfg.setdefault("sky_map", {})
     cfg.setdefault("decimate_ratio", 1.0)
+    cfg.setdefault("sky_radius", 0.0)
 
     bsp = Path(args.bsp).resolve()
     if not bsp.exists():
@@ -120,28 +196,38 @@ def main():
     obj_path    = out / (bsp.stem + ".obj")
     spawn_file  = out / (bsp.stem + ".spawn")
     props_file  = out / (bsp.stem + ".props.json")
+    sky_obj_path   = out / (bsp.stem + ".sky.obj")
+    sky_cam_path   = out / (bsp.stem + ".sky_camera.json")
     tex_dir     = out / "textures"
     if tex_dir.exists():
         shutil.rmtree(tex_dir)
     tex_dir.mkdir()
 
+    norm_bsp = out / (bsp.stem + "_normalized.bsp")
+    bsp_for_tool = norm_bsp if _normalize_bsp(bsp, norm_bsp) else bsp
+    if bsp_for_tool == norm_bsp:
+        print(f"  Decompressed LZMA lumps -> {norm_bsp.name}")
+
     print("[1/4] Converting BSP to OBJ...")
     bsp2obj_cmd = [
-        str(bsp2obj_bin), str(bsp), str(obj_path),
+        str(bsp2obj_bin), str(bsp_for_tool), str(obj_path),
         "--scale", str(cfg["scale_factor"]),
         "--spawn-out", str(spawn_file),
         "--props-out", str(props_file),
+        "--skybox-out", str(sky_obj_path),
+        "--sky-camera-out", str(sky_cam_path),
+        "--sky-radius", str(cfg["sky_radius"]),
     ]
     if args.keep_tools:
         bsp2obj_cmd.append("--keep-tools")
     subprocess.run(bsp2obj_cmd, check=True)
 
-    skyname = _read_skyname(str(bsp))
+    skyname = _read_skyname(str(bsp_for_tool))
     background = _skyname_to_background(skyname, cfg["sky_map"], cfg["default_background"])
     skybox_bin = _BG_SEGMENT.get(background, "water")
     print(f"  Sky: {skyname!r} -> background={background} skybox-bin={skybox_bin}")
 
-    env_data = read_bsp_env.read_env(str(bsp))
+    env_data = read_bsp_env.read_env(str(bsp_for_tool))
     env_json_path = None
     if env_data:
         import json as _env_json_mod
@@ -177,7 +263,10 @@ def main():
             print("  [warn] No spawn entity found, using origin (0, 0, 0)")
 
     print("[2/4] Extracting PAK textures...")
-    vtf_files, vmt_files = unpack_pak.extract_pak(str(bsp), str(tex_dir))
+    vtf_files, vmt_files = unpack_pak.extract_pak(str(bsp_for_tool), str(tex_dir))
+
+    if bsp_for_tool != bsp:
+        norm_bsp.unlink(missing_ok=True)
 
     game_path = cfg.get("game_path", "")
     if game_path and Path(game_path).is_dir():
@@ -240,10 +329,16 @@ def main():
         props_json=props_file if props_file.exists() else None,
         bsp_scale=cfg["scale_factor"],
         env_json=env_json_path,
+        sky_obj=str(sky_obj_path) if sky_obj_path.exists() else None,
+        sky_camera_json=str(sky_cam_path) if sky_cam_path.exists() else None,
     )
     level_name = cfg["level_name"]
     print("[4/5] Converting Fast64 output to native sm64-port format...")
     native_out = out / "native_level" / level_name
+    sky_camera_data = None
+    if sky_cam_path.exists():
+        with open(sky_cam_path) as _scf:
+            sky_camera_data = json.load(_scf)
     f64_to_native.convert(
         sm64_out / level_name,
         native_out,
@@ -253,6 +348,19 @@ def main():
         skybox_bin=skybox_bin,
         env_json=env_json_path,
     )
+    if sky_obj_path.exists() and sky_camera_data is not None:
+        print("[4b/5] Converting sky Fast64 output to native format...")
+        sky_level_name = level_name + "_sky"
+        f64_to_native.convert_sky(
+            sm64_out / sky_level_name,
+            native_out / "sky",
+            level_name,
+            sky_camera_data["origin"],
+            sky_camera_data["scale"],
+            scale_factor=cfg["scale_factor"],
+            blender_to_sm64_scale=cfg["blender_to_sm64_scale"],
+            collision_divisor=cfg["collision_divisor"],
+        )
 
     sm64_port_path = cfg.get("sm64_port_path", "")
     if sm64_port_path:
