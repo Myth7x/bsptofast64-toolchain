@@ -87,7 +87,10 @@ def _write_leveldata(dst: Path, level_name: str, has_lighting: bool = False) -> 
     content += f'#include "levels/{level_name}/areas/1/collision.inc.c"\n'
     content += f'#include "levels/{level_name}/areas/1/macro.inc.c"\n'
     if has_lighting:
+        level_define = 'LEVEL_' + level_name.upper()
+        content += f'#define LEVEL_LIGHTING_NUM {level_define}\n'
         content += f'#include "levels/{level_name}/level_lighting.inc.c"\n'
+        content += f'#undef LEVEL_LIGHTING_NUM\n'
     dst.write_text(content, encoding="utf-8")
 
 
@@ -151,11 +154,26 @@ def _write_level_lighting(dst: Path, env: dict) -> None:
     dz = -math.cos(elev) * math.sin(yaw_r)
     ar, ag, ab = env.get("ambient_color", [0.3, 0.3, 0.3])
     sr, sg, sb = env.get("sun_color", [1.0, 1.0, 1.0])
+    fog = env.get("fog", None)
     lines = [
         '#include "src/pc/gfx/level_lights.h"',
-        f'static void level_apply_bsp_lighting(void) {{',
+        '#include "level_table.h"',
+        'static void s_lighting_apply(void) {',
         f'    level_lights_set_ambient({ar:.6f}f, {ag:.6f}f, {ab:.6f}f, 1.0f);',
         f'    level_lights_set_sun({dx:.6f}f, {dy:.6f}f, {dz:.6f}f, {sr:.6f}f, {sg:.6f}f, {sb:.6f}f);',
+        '    level_lights_set_shadow_count(1);',
+        '    level_lights_compute_shadow_vp_sun(0, 0.0f, 0.0f, 0.0f, 10000.0f);',
+    ]
+    if fog:
+        fr, fg_c, fb = fog["fog_color"]
+        lines.append(
+            f'    level_lights_set_fog({fr:.6f}f, {fg_c:.6f}f, {fb:.6f}f,'
+            f' {fog["fog_start"]:.1f}f, {fog["fog_end"]:.1f}f, {fog["fog_max_density"]:.4f}f);'
+        )
+    lines += [
+        '}',
+        '__attribute__((constructor)) static void s_lighting_register(void) {',
+        '    level_lighting_register(LEVEL_LIGHTING_NUM, s_lighting_apply);',
         '}',
     ]
     dst.write_text('\n'.join(lines) + '\n', encoding='utf-8')

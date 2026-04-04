@@ -21,12 +21,13 @@ def _parse_light_str(s, ref_intensity=200.0):
 
 def read_env(bsp_path):
     """
-    Parse light_environment entity from BSP lump 0.
+    Parse light_environment and env_fog_controller entities from BSP lump 0.
     Returns dict with:
       sun_color       (r, g, b)  0-1 normalized
       ambient_color   (r, g, b)  0-1 normalized
       sun_pitch       float  degrees, Source convention (negative = above horizon)
       sun_yaw         float  degrees, Source convention (0=east/+X, 90=north/+Y)
+      fog             dict with fog_color, fog_start, fog_end, fog_max_density (optional)
     or None if no light_environment found.
     """
     with open(bsp_path, "rb") as f:
@@ -37,42 +38,78 @@ def read_env(bsp_path):
         f.seek(fileofs)
         entities = f.read(filelen).decode("utf-8", errors="replace")
 
-    for block in re.split(r'(?<=\})\s*(?=\{)', entities):
-        if '"classname" "light_environment"' not in block:
-            continue
+    blocks = re.split(r'(?<=\})\s*(?=\{)', entities)
 
-        def get(key, default=""):
-            m = re.search(r'"' + re.escape(key) + r'"\s+"([^"]*)"', block, re.IGNORECASE)
-            return m.group(1).strip() if m else default
+    light_result = None
+    fog_result = None
 
-        sun_str = get("_light", "255 255 255 200")
-        amb_str = get("_ambient", "128 128 128 200")
-        angles_str = get("angles", "0 270 0")
-        pitch_str = get("pitch", "")
+    for block in blocks:
+        if light_result is None and '"classname" "light_environment"' in block:
+            def get(key, default=""):
+                m = re.search(r'"' + re.escape(key) + r'"\s+"([^"]*)"', block, re.IGNORECASE)
+                return m.group(1).strip() if m else default
 
-        angles_parts = angles_str.split()
-        yaw = float(angles_parts[1]) if len(angles_parts) >= 2 else 270.0
+            sun_str = get("_light", "255 255 255 200")
+            amb_str = get("_ambient", "128 128 128 200")
+            angles_str = get("angles", "0 270 0")
+            pitch_str = get("pitch", "")
 
-        if pitch_str:
-            pitch = float(pitch_str)
-        elif len(angles_parts) >= 1:
-            pitch = float(angles_parts[0])
-        else:
-            pitch = -45.0
+            angles_parts = angles_str.split()
+            yaw = float(angles_parts[1]) if len(angles_parts) >= 2 else 270.0
 
-        sun_color = _parse_light_str(sun_str)
-        amb_color = _parse_light_str(amb_str)
+            if pitch_str:
+                pitch = float(pitch_str)
+            elif len(angles_parts) >= 1:
+                pitch = float(angles_parts[0])
+            else:
+                pitch = -45.0
 
-        if sun_color is None:
-            sun_color = (1.0, 1.0, 1.0)
-        if amb_color is None:
-            amb_color = (0.5, 0.5, 0.5)
+            sun_color = _parse_light_str(sun_str)
+            amb_color = _parse_light_str(amb_str)
 
-        return {
-            "sun_color": list(sun_color),
-            "ambient_color": list(amb_color),
-            "sun_pitch": pitch,
-            "sun_yaw": yaw,
-        }
+            if sun_color is None:
+                sun_color = (1.0, 1.0, 1.0)
+            if amb_color is None:
+                amb_color = (0.5, 0.5, 0.5)
 
-    return None
+            light_result = {
+                "sun_color": list(sun_color),
+                "ambient_color": list(amb_color),
+                "sun_pitch": pitch,
+                "sun_yaw": yaw,
+            }
+
+        if fog_result is None and '"classname" "env_fog_controller"' in block:
+            def get_fog(key, default=""):
+                m = re.search(r'"' + re.escape(key) + r'"\s+"([^"]*)"', block, re.IGNORECASE)
+                return m.group(1).strip() if m else default
+
+            if get_fog("fogenable", "0") == "1":
+                raw_color = get_fog("fogcolor", "128 128 128").split()
+                try:
+                    fr, fg, fb = int(raw_color[0]) / 255.0, int(raw_color[1]) / 255.0, int(raw_color[2]) / 255.0
+                except (ValueError, IndexError):
+                    fr, fg, fb = 0.5, 0.5, 0.5
+                try:
+                    fog_start = float(get_fog("fogstart", "512"))
+                    fog_end = float(get_fog("fogend", "2048"))
+                    fog_max_density = float(get_fog("fogmaxdensity", "1.0") or "1.0")
+                except ValueError:
+                    fog_start, fog_end, fog_max_density = 512.0, 2048.0, 1.0
+                fog_result = {
+                    "fog_color": [fr, fg, fb],
+                    "fog_start": fog_start,
+                    "fog_end": fog_end,
+                    "fog_max_density": fog_max_density,
+                }
+
+        if light_result is not None and fog_result is not None:
+            break
+
+    if light_result is None:
+        return None
+
+    if fog_result is not None:
+        light_result["fog"] = fog_result
+
+    return light_result

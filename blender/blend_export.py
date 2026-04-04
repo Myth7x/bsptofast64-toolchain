@@ -177,6 +177,16 @@ def main():
         imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]
     print(f"== blend_export: imported {len(imported)} mesh objects", flush=True)
 
+    import bmesh as _bmesh_weld
+    for _wobj in imported:
+        _wbm = _bmesh_weld.new()
+        _wbm.from_mesh(_wobj.data)
+        _bmesh_weld.ops.remove_doubles(_wbm, verts=_wbm.verts, dist=0.001)
+        _wbm.to_mesh(_wobj.data)
+        _wbm.free()
+        _wobj.data.update()
+    print(f"== blend_export: vertex weld done ({len(imported)} objects)", flush=True)
+
     import time as _time
 
     _all_mat_names = []
