@@ -26,7 +26,7 @@ def _png_index(textures_dir):
 
 
 def find_png(textures_dir, material_name):
-    tex_dir = Path(textures_dir)
+    tex_dir = Path(textures_dir).resolve()
 
     direct = tex_dir / "materials" / (material_name.lower() + ".png")
     if direct.exists():
@@ -46,6 +46,9 @@ def find_png(textures_dir, material_name):
 
 
 def find_png_for_material(textures_dir, material_name, mat_props, underscore_to_slash=None):
+    import re as _re
+    # Strip Blender's automatic deduplication suffix (.001, .002, .003, …)
+    material_name = _re.sub(r'\.\d{3}$', '', material_name)
     key = material_name.lower().replace("\\", "/")
     props = mat_props.get(key)
     slash_key = None
@@ -63,6 +66,7 @@ def find_png_for_material(textures_dir, material_name, mat_props, underscore_to_
 
 def apply_alpha_mode(mat, alpha_mode):
     rdp = mat.f3d_mat.rdp_settings
+    has_tex = mat.f3d_mat.tex0.tex_set and mat.f3d_mat.tex0.tex is not None
     if alpha_mode == "clip":
         rdp.set_rendermode = True
         rdp.rendermode_preset_cycle_1 = "G_RM_AA_ZB_TEX_EDGE"
@@ -73,6 +77,13 @@ def apply_alpha_mode(mat, alpha_mode):
         rdp.rendermode_preset_cycle_1 = "G_RM_AA_ZB_XLU_SURF"
         rdp.rendermode_preset_cycle_2 = "G_RM_AA_ZB_XLU_SURF2"
         mat.f3d_mat.draw_layer.sm64 = "5"
+        # Use texture alpha channel in combiner only when a texture is actually loaded
+        if has_tex:
+            try:
+                mat.f3d_mat.combiner1.D_alpha = "TEXEL0"
+                mat.f3d_mat.combiner2.D_alpha = "TEXEL0"
+            except Exception:
+                pass
 
 
 def main():
@@ -100,6 +111,7 @@ def main():
     parser.add_argument("--env-json", default=None)
     parser.add_argument("--sky-obj", default=None)
     parser.add_argument("--sky-camera-json", default=None)
+    parser.add_argument("--sky-cube-obj", default=None)
     args = parser.parse_args(argv)
 
     mat_props = {}
@@ -245,27 +257,38 @@ def main():
                 new_mat.f3d_mat.f3d_light1 = _sun_light_data
 
             if png_path:
-                img = bpy.data.images.load(png_path, check_existing=True)
-                new_mat.f3d_mat.tex0.tex_set = True
-                new_mat.f3d_mat.tex0.tex = img
-                new_mat.f3d_mat.tex0.tex_format = "RGBA16"
-                _iw, _ih = int(img.size[0]), int(img.size[1])
-                if _iw > 0 and _ih > 0 and new_mat.f3d_mat.tex0.autoprop:
-                    import math as _imath
-                    def _log2up(n):
-                        return max(1, int(_imath.ceil(_imath.log2(n))))
-                    new_mat.f3d_mat.tex0.S.mask = _log2up(_iw)
-                    new_mat.f3d_mat.tex0.S.shift = 0
-                    new_mat.f3d_mat.tex0.S.low = 0.0
-                    new_mat.f3d_mat.tex0.S.high = float(_iw - 1)
-                    new_mat.f3d_mat.tex0.T.mask = _log2up(_ih)
-                    new_mat.f3d_mat.tex0.T.shift = 0
-                    new_mat.f3d_mat.tex0.T.low = 0.0
-                    new_mat.f3d_mat.tex0.T.high = float(_ih - 1)
+                try:
+                    img = bpy.data.images.load(png_path, check_existing=True)
+                    new_mat.f3d_mat.tex0.tex_set = True
+                    new_mat.f3d_mat.tex0.tex = img
+                    new_mat.f3d_mat.tex0.tex_format = "RGBA16"
+                    _iw, _ih = int(img.size[0]), int(img.size[1])
+                    if _iw > 0 and _ih > 0 and new_mat.f3d_mat.tex0.autoprop:
+                        import math as _imath
+                        def _log2up(n):
+                            return max(1, int(_imath.ceil(_imath.log2(n))))
+                        new_mat.f3d_mat.tex0.S.mask = _log2up(_iw)
+                        new_mat.f3d_mat.tex0.S.shift = 0
+                        new_mat.f3d_mat.tex0.S.low = 0.0
+                        new_mat.f3d_mat.tex0.S.high = float(_iw - 1)
+                        new_mat.f3d_mat.tex0.T.mask = _log2up(_ih)
+                        new_mat.f3d_mat.tex0.T.shift = 0
+                        new_mat.f3d_mat.tex0.T.low = 0.0
+                        new_mat.f3d_mat.tex0.T.high = float(_ih - 1)
+                except RuntimeError as _e:
+                    print(f"== blend_export: [warn] could not load {png_path!r}: {_e}", flush=True)
             else:
                 print(f"== blend_export: [warn] no texture found for {mat_name!r}", flush=True)
+                # Preset sets tex_set=True by default; clear it so Fast64 doesn't error
+                new_mat.f3d_mat.tex0.tex_set = False
+                new_mat.f3d_mat.tex1.tex_set = False
 
-            props = mat_props.get(mat_name.lower()) or mat_props.get(mat_name.lower().replace("\\", "/"))
+            _alpha_key = mat_name.lower().replace("\\", "/")
+            props = mat_props.get(_alpha_key)
+            if props is None:
+                _aslash = underscore_to_slash.get(_alpha_key)
+                if _aslash:
+                    props = mat_props.get(_aslash)
             if props and props.get("alpha_mode", "opaque") != "opaque":
                 apply_alpha_mode(new_mat, props["alpha_mode"])
 
@@ -435,7 +458,12 @@ def main():
         print("== blend_export: starting sky export", flush=True)
 
         sky_scene = bpy.data.scenes.new("sky_export_scene")
+        # Inherit the world from the main scene so Fast64 doesn't spam "No world selected"
+        sky_scene.world = scene.world if scene.world else (bpy.data.worlds[0] if bpy.data.worlds else None)
         bpy.context.window.scene = sky_scene
+        # Make the sun light object visible in this scene so Fast64 can resolve it
+        if _sun_light_obj is not None and _sun_light_obj.name not in sky_scene.collection.objects:
+            sky_scene.collection.objects.link(_sun_light_obj)
         sky_scene.f3d_type = "F3DEX2/LX2"
         sky_scene.display_settings.display_device = "sRGB"
         sky_scene.view_settings.view_transform = "Standard"
@@ -448,6 +476,14 @@ def main():
             bpy.ops.wm.obj_import(filepath=args.sky_obj, forward_axis='NEGATIVE_Z', up_axis='Y')
         else:
             bpy.ops.import_scene.obj(filepath=args.sky_obj, axis_forward='-Z', axis_up='Y')
+
+        # Also import cubemap box if provided
+        if args.sky_cube_obj and Path(args.sky_cube_obj).exists():
+            print(f"== blend_export: importing cubemap box OBJ", flush=True)
+            if blender_ver >= (3, 3, 0):
+                bpy.ops.wm.obj_import(filepath=args.sky_cube_obj, forward_axis='NEGATIVE_Z', up_axis='Y')
+            else:
+                bpy.ops.import_scene.obj(filepath=args.sky_cube_obj, axis_forward='-Z', axis_up='Y')
 
         sky_imported = [o for o in bpy.data.objects if o not in _sky_before and o.type == "MESH"]
         print(f"== blend_export: sky imported {len(sky_imported)} mesh objects", flush=True)
@@ -489,22 +525,35 @@ def main():
                     _snew.f3d_mat.f3d_light1 = _sun_light_data
                 if _spng:
                     import math as _simath
-                    _simg = bpy.data.images.load(_spng, check_existing=True)
-                    _snew.f3d_mat.tex0.tex_set = True
-                    _snew.f3d_mat.tex0.tex = _simg
-                    _snew.f3d_mat.tex0.tex_format = "RGBA16"
-                    _siw, _sih = int(_simg.size[0]), int(_simg.size[1])
-                    if _siw > 0 and _sih > 0 and _snew.f3d_mat.tex0.autoprop:
-                        def _slog2up(n):
-                            return max(1, int(_simath.ceil(_simath.log2(n))))
-                        _snew.f3d_mat.tex0.S.mask = _slog2up(_siw)
-                        _snew.f3d_mat.tex0.S.shift = 0
-                        _snew.f3d_mat.tex0.S.low = 0.0
-                        _snew.f3d_mat.tex0.S.high = float(_siw - 1)
-                        _snew.f3d_mat.tex0.T.mask = _slog2up(_sih)
-                        _snew.f3d_mat.tex0.T.shift = 0
-                        _snew.f3d_mat.tex0.T.low = 0.0
-                        _snew.f3d_mat.tex0.T.high = float(_sih - 1)
+                    try:
+                        _simg = bpy.data.images.load(_spng, check_existing=True)
+                        _snew.f3d_mat.tex0.tex_set = True
+                        _snew.f3d_mat.tex0.tex = _simg
+                        _snew.f3d_mat.tex0.tex_format = "RGBA16"
+                        _siw, _sih = int(_simg.size[0]), int(_simg.size[1])
+                        if _siw > 0 and _sih > 0 and _snew.f3d_mat.tex0.autoprop:
+                            def _slog2up(n):
+                                return max(1, int(_simath.ceil(_simath.log2(n))))
+                            _snew.f3d_mat.tex0.S.mask = _slog2up(_siw)
+                            _snew.f3d_mat.tex0.S.shift = 0
+                            _snew.f3d_mat.tex0.S.low = 0.0
+                            _snew.f3d_mat.tex0.S.high = float(_siw - 1)
+                            _snew.f3d_mat.tex0.T.mask = _slog2up(_sih)
+                            _snew.f3d_mat.tex0.T.shift = 0
+                            _snew.f3d_mat.tex0.T.low = 0.0
+                            _snew.f3d_mat.tex0.T.high = float(_sih - 1)
+                    except RuntimeError as _se:
+                        print(f"== blend_export: [warn] sky could not load {_spng!r}: {_se}", flush=True)
+                # Apply alpha mode (e.g. $translucent trees need XLU blend)
+                _alpha_key_sky = _smn.lower().replace("\\", "/")
+                _props_sky = mat_props.get(_alpha_key_sky)
+                if _props_sky is None:
+                    _aslash_sky = underscore_to_slash.get(_alpha_key_sky)
+                    if _aslash_sky:
+                        _props_sky = mat_props.get(_aslash_sky)
+                if _props_sky and _props_sky.get("alpha_mode", "opaque") != "opaque":
+                    apply_alpha_mode(_snew, _props_sky["alpha_mode"])
+                    print(f"== blend_export: sky mat {_smn!r} alpha_mode={_props_sky['alpha_mode']!r}", flush=True)
                 _sslot.material = _snew
                 sky_mat_cache[_smn] = _snew
 
@@ -528,7 +577,10 @@ def main():
             _smod = _sobj.modifiers.new(name="SkyDissolve", type="DECIMATE")
             _smod.decimate_type = "DISSOLVE"
             _smod.angle_limit = _sdmath.radians(1.0)
-            bpy.ops.object.modifier_apply(modifier=_smod.name)
+            if len(_sobj.data.polygons) > 3:
+                bpy.ops.object.modifier_apply(modifier=_smod.name)
+            else:
+                _sobj.modifiers.remove(_smod)
             if len(_sobj.data.polygons) == 0:
                 bpy.data.objects.remove(_sobj, do_unlink=True)
                 continue

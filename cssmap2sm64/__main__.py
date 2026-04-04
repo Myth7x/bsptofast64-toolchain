@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from .cli import build_parser
-from .stages import unpack_pak, blend_run, f64_to_native, parse_vmt, extract_vpk, read_bsp_env
+from .stages import unpack_pak, blend_run, f64_to_native, parse_vmt, extract_vpk, read_bsp_env, sky_cubemap
 
 _BG_SEGMENT = {
     "OCEAN_SKY": "water",
@@ -271,10 +271,11 @@ def main():
     game_path = cfg.get("game_path", "")
     if game_path and Path(game_path).is_dir():
         mat_slugs = set()
-        if obj_path.exists():
-            for line in obj_path.read_text(errors="replace").splitlines():
-                if line.startswith("usemtl "):
-                    mat_slugs.add(line[7:].strip().lower())
+        for _slug_obj in [obj_path, sky_obj_path]:
+            if _slug_obj.exists():
+                for line in _slug_obj.read_text(errors="replace").splitlines():
+                    if line.startswith("usemtl "):
+                        mat_slugs.add(line[7:].strip().lower())
         mat_dir = str(tex_dir / "materials")
         already = set()
         for p in vtf_files:
@@ -307,6 +308,40 @@ def main():
         parse_vmt.parse_vmts([str(p) for p in all_vmts], tex_dir)
         materials_json = tex_dir / "materials.json"
 
+    # Compute SM64 sky origin for cubemap centering
+    sm64_sky_origin = (0, 0, 0)
+    if sky_cam_path.exists():
+        import json as _scj
+        _sc = _scj.loads(sky_cam_path.read_text())
+        _ox, _oy, _oz = _sc["origin"]
+        _sky_scale = _sc["scale"]
+        _net = cfg["blender_to_sm64_scale"] / cfg["collision_divisor"]
+        sm64_sky_origin = (
+            round(_ox * cfg["scale_factor"] * _net * _sky_scale),
+            round(_oz * cfg["scale_factor"] * _net * _sky_scale),
+            round(-_oy * cfg["scale_factor"] * _net * _sky_scale),
+        )
+        print(f"  Sky SM64 origin: {sm64_sky_origin}")
+
+    # Extract sky cubemap faces and generate a cubemap box OBJ
+    sky_cube_obj_path = out / (bsp.stem + ".sky_cube.obj")
+    if game_path and Path(game_path).is_dir() and skyname:
+        print("[2b/4] Extracting skybox cubemap faces...")
+        cube_pngs = sky_cubemap.extract_sky_faces(
+            game_path, skyname, str(tex_dir), str(vtf2png_bin)
+        )
+        if cube_pngs:
+            sky_cubemap.generate_cubemap_obj(
+                str(sky_cube_obj_path), skyname,
+                tex_dir=str(tex_dir), sm64_origin=sm64_sky_origin
+            )
+            print(f"  Cubemap box: {len(cube_pngs)} faces -> {sky_cube_obj_path.name}")
+        else:
+            sky_cube_obj_path = None
+            print(f"  Cubemap: no faces found for skyname={skyname!r}, skipping")
+    else:
+        sky_cube_obj_path = None
+
     if args.no_blend:
         print(f"[3/5] Skipped (--no-blend). OBJ: {obj_path}")
         print(f"Done. Output in {out}/")
@@ -331,6 +366,7 @@ def main():
         env_json=env_json_path,
         sky_obj=str(sky_obj_path) if sky_obj_path.exists() else None,
         sky_camera_json=str(sky_cam_path) if sky_cam_path.exists() else None,
+        sky_cube_obj=str(sky_cube_obj_path) if sky_cube_obj_path and sky_cube_obj_path.exists() else None,
     )
     level_name = cfg["level_name"]
     print("[4/5] Converting Fast64 output to native sm64-port format...")

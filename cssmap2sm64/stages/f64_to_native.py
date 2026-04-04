@@ -380,11 +380,14 @@ def convert_sky(
         )
 
     # 3. Compute SM64 sky origin (Source world coords → SM64 units)
+    #    The sky geometry in bsp2obj is exported scaled by (scale_factor * sky_scale),
+    #    so the origin must also be multiplied by sky_scale to match the geometry's
+    #    coordinate space.
     ox, oy, oz = sky_origin
     net = blender_to_sm64_scale / collision_divisor
-    sm64_x = round(ox * scale_factor * net)
-    sm64_y = round(oz * scale_factor * net)   # Source Z → SM64 Y
-    sm64_z = round(-oy * scale_factor * net)  # Source Y (negated) → SM64 Z
+    sm64_x = round(ox * scale_factor * net * sky_scale)
+    sm64_y = round(oz * scale_factor * net * sky_scale)   # Source Z → SM64 Y
+    sm64_z = round(-oy * scale_factor * net * sky_scale)  # Source Y (negated) → SM64 Z
 
     # 4. Write sky_camera.inc.h
     guard = f"SKY3D_CAMERA_{level_name.upper()}_H"
@@ -397,7 +400,6 @@ def convert_sky(
         f"#define SKY3D_SCALE    {int(sky_scale)}\n\n"
         f"#ifndef __ASSEMBLER__\n"
         f"#include <PR/gbi.h>\n"
-        f"extern Gfx sky3d_display_list[];\n"
         f"#endif\n\n"
         f"#endif /* {guard} */\n"
     )
@@ -411,16 +413,21 @@ def convert_sky(
         "/* forward declaration — defined in src/game/skybox3d.c */",
         "void sky3d_register(Gfx *dl, s32 ox, s32 oy, s32 oz, s32 scale);",
         "",
-        "Gfx sky3d_display_list[] = {",
+        "static Gfx sky3d_display_list[] = {",
     ]
-    for dl in dl_names:
+    # Put cubemap DLs first so they render as the far background before BSP sky geometry.
+    # Without this ordering, BSP sky geometry writes depth first and the cubemap
+    # (200 000 units away) fails the Z-test and is invisible.
+    cubemap_dls = [d for d in dl_names if "_skybox_" in d and "_tides" in d]
+    other_dls   = [d for d in dl_names if d not in cubemap_dls]
+    for dl in cubemap_dls + other_dls:
         geo_lines.append(f"    gsSPDisplayList({dl}),")
     geo_lines += [
         "    gsDPNoOpTag(0x534B5944u),  /* sky depth-clear marker (SKYD) */",
         "    gsSPEndDisplayList(),",
         "};",
         "",
-        f"static s32 {level_name}_sky_init(UNUSED s16 arg, UNUSED s32 unused) {{",
+        f"s32 {level_name}_sky_init(UNUSED s16 arg, UNUSED s32 unused) {{",
         f"    sky3d_register(sky3d_display_list,"
         f" SKY3D_ORIGIN_X, SKY3D_ORIGIN_Y, SKY3D_ORIGIN_Z, SKY3D_SCALE);",
         "    return 0;",
@@ -428,6 +435,20 @@ def convert_sky(
         "",
     ]
     (dst_sky_dir / "sky_geo.inc.c").write_text("\n".join(geo_lines), encoding="utf-8")
+
+    # 6b. Add forward declaration to header.h so script.c can reference sky_init
+    hdr_path = native_out / "header.h"
+    if hdr_path.exists():
+        hdr_text = hdr_path.read_text(encoding="utf-8")
+        sky_decl = f"s32 {level_name}_sky_init(s16, s32);\n"
+        if sky_decl not in hdr_text:
+            # Insert before the final #endif
+            hdr_text = hdr_text.rstrip()
+            if hdr_text.endswith("#endif"):
+                hdr_text = hdr_text[:-len("#endif")].rstrip() + "\n\n" + sky_decl + "\n#endif\n"
+            else:
+                hdr_text += "\n" + sky_decl
+            hdr_path.write_text(hdr_text, encoding="utf-8")
 
     # 6. Append sky include to native leveldata.c
     ld_path = native_out / "leveldata.c"
@@ -437,15 +458,16 @@ def convert_sky(
         if sky_include not in ld_text:
             ld_path.write_text(ld_text + sky_include, encoding="utf-8")
 
-    # 7. Inject sky_init CALL into native script.c before lvl_init_or_update
+    # 7. Inject sky_init CALL into native script.c AFTER lvl_init_or_update (init call)
+    #    so that init_level() runs first (clearing any stale sky state before sky is registered)
     sc_path = native_out / "script.c"
     if sc_path.exists():
         sc_text = sc_path.read_text(encoding="utf-8")
-        sky_call = f"    CALL(0, {level_name}_sky_init),\n"
+        sky_call = f"\tCALL(0, {level_name}_sky_init),\n"
         if sky_call not in sc_text:
             sc_text = re.sub(
-                r'(\s*CALL\s*\(\s*0\s*,\s*lvl_init_or_update\s*\))',
-                "\n" + sky_call.rstrip("\n") + r'\1',
+                r'([ \t]*CALL\s*\(\s*0\s*,\s*lvl_init_or_update\s*\)\s*,[ \t]*\n)',
+                r'\1' + sky_call,
                 sc_text,
             )
             sc_path.write_text(sc_text, encoding="utf-8")
