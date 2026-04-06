@@ -105,7 +105,6 @@ def main():
     parser.add_argument("--spawn", default="0,0,0")
     parser.add_argument("--materials-json", default=None)
     parser.add_argument("--background-sky", default="ABOVE_CLOUDS")
-    parser.add_argument("--decimate-ratio", type=float, default=1.0)
     parser.add_argument("--props-json", default=None)
     parser.add_argument("--bsp-scale", type=float, default=1.0)
     parser.add_argument("--env-json", default=None)
@@ -202,14 +201,22 @@ def main():
     print(f"== blend_export: applied import rotation to vertex positions", flush=True)
 
     import bmesh as _bmesh_weld
+    bpy.ops.object.select_all(action="DESELECT")
     for _wobj in imported:
-        _wbm = _bmesh_weld.new()
-        _wbm.from_mesh(_wobj.data)
-        _bmesh_weld.ops.remove_doubles(_wbm, verts=_wbm.verts, dist=0.001)
-        _wbm.to_mesh(_wobj.data)
-        _wbm.free()
-        _wobj.data.update()
-    print(f"== blend_export: vertex weld done ({len(imported)} objects)", flush=True)
+        _wobj.select_set(True)
+    if imported:
+        bpy.context.view_layer.objects.active = imported[0]
+        if len(imported) > 1:
+            bpy.ops.object.join()
+        imported = [bpy.context.active_object]
+    _joined = imported[0]
+    _jbm = _bmesh_weld.new()
+    _jbm.from_mesh(_joined.data)
+    _bmesh_weld.ops.remove_doubles(_jbm, verts=_jbm.verts, dist=0.1)
+    _jbm.to_mesh(_joined.data)
+    _jbm.free()
+    _joined.data.update()
+    print(f"== blend_export: vertex weld done (joined, {len(_joined.data.vertices)} verts)", flush=True)
 
     import time as _time
 
@@ -302,61 +309,16 @@ def main():
     for mat in mat_cache.values():
         mat.collision_type_simple = "SURFACE_DEFAULT"
 
-    if args.decimate_ratio < 1.0:
-        import math as _dmath
-        import bmesh as _bmesh
-        print(f"== blend_export: decimating with ratio={args.decimate_ratio}", flush=True)
-        surviving = []
-        for obj in imported:
-            before = len(obj.data.polygons)
-            if before == 0:
-                surviving.append(obj)
-                continue
-
-            bpy.context.view_layer.objects.active = obj
-
-            # Fuse co-located vertices: bsp2obj emits every face with independent verts
-            # (no sharing), so the mesh is entirely non-manifold. remove_doubles
-            # reconnects shared edge vertices, making DISSOLVE/COLLAPSE hole-free.
-            _bm = _bmesh.new()
-            _bm.from_mesh(obj.data)
-            _bmesh.ops.remove_doubles(_bm, verts=_bm.verts, dist=0.01)
-            _bm.to_mesh(obj.data)
-            _bm.free()
-            obj.data.update()
-            after_merge = len(obj.data.polygons)
-
-            # Pass 1: DISSOLVE — merges coplanar adjacent faces (now has shared edges)
-            mod_d = obj.modifiers.new(name="Dissolve", type="DECIMATE")
-            mod_d.decimate_type = "DISSOLVE"
-            mod_d.angle_limit = _dmath.radians(1.0)
-            bpy.ops.object.modifier_apply(modifier=mod_d.name)
-            after_dissolve = len(obj.data.polygons)
-
-            # Pass 2: COLLAPSE — safe now that mesh is manifold (no T-junction holes)
-            target = max(1, int(before * args.decimate_ratio))
-            after = after_dissolve
-            if after_dissolve > target:
-                effective_ratio = max(args.decimate_ratio, 1.0 / after_dissolve)
-                mod_c = obj.modifiers.new(name="Decimate", type="DECIMATE")
-                mod_c.ratio = effective_ratio
-                bpy.ops.object.modifier_apply(modifier=mod_c.name)
-                after = len(obj.data.polygons)
-
-            if after == 0:
-                print(f"  [skip] {obj.name}: {before} -> 0 polys, removing", flush=True)
-                bpy.data.objects.remove(obj, do_unlink=True)
-                continue
-
-            print(
-                f"  {obj.name}: {before} merge->{after_merge} dissolve->{after_dissolve} collapse->{after}"
-                f" ({after/before*100:.0f}%)",
-                flush=True,
-            )
-            surviving.append(obj)
-        imported = surviving
-
-    print(f"== blend_export: {len(imported)} per-material objects (split at OBJ import)", flush=True)
+    bpy.ops.object.select_all(action="DESELECT")
+    for _o in imported:
+        _o.select_set(True)
+    if imported:
+        bpy.context.view_layer.objects.active = imported[0]
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.separate(type='MATERIAL')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        imported = [o for o in bpy.context.selected_objects if o.type == 'MESH' and len(o.data.polygons) > 0]
+    print(f"== blend_export: {len(imported)} per-material mesh objects ready", flush=True)
 
     level_root = bpy.data.objects.new("Level Root", None)
     bpy.context.scene.collection.objects.link(level_root)
@@ -538,13 +500,21 @@ def main():
             _simp.rotation_euler = (0.0, 0.0, 0.0)
 
         import bmesh as _sky_bmesh
+        bpy.ops.object.select_all(action="DESELECT")
         for _swobj in sky_imported:
-            _swbm = _sky_bmesh.new()
-            _swbm.from_mesh(_swobj.data)
-            _sky_bmesh.ops.remove_doubles(_swbm, verts=_swbm.verts, dist=0.001)
-            _swbm.to_mesh(_swobj.data)
-            _swbm.free()
-            _swobj.data.update()
+            _swobj.select_set(True)
+        if sky_imported:
+            bpy.context.view_layer.objects.active = sky_imported[0]
+            if len(sky_imported) > 1:
+                bpy.ops.object.join()
+            sky_imported = [bpy.context.active_object]
+        _sky_joined = sky_imported[0]
+        _sjbm = _sky_bmesh.new()
+        _sjbm.from_mesh(_sky_joined.data)
+        _sky_bmesh.ops.remove_doubles(_sjbm, verts=_sjbm.verts, dist=0.1)
+        _sjbm.to_mesh(_sky_joined.data)
+        _sjbm.free()
+        _sky_joined.data.update()
 
         sky_mat_cache = {}
         for _sobj in sky_imported:
@@ -603,32 +573,16 @@ def main():
         for _sm in sky_mat_cache.values():
             _sm.collision_type_simple = "SURFACE_DEFAULT"
 
-        import math as _sdmath
-        import bmesh as _sdbmesh
-        sky_surviving = []
-        for _sobj in sky_imported:
-            if len(_sobj.data.polygons) == 0:
-                sky_surviving.append(_sobj)
-                continue
-            bpy.context.view_layer.objects.active = _sobj
-            _sbm = _sdbmesh.new()
-            _sbm.from_mesh(_sobj.data)
-            _sdbmesh.ops.remove_doubles(_sbm, verts=_sbm.verts, dist=0.01)
-            _sbm.to_mesh(_sobj.data)
-            _sbm.free()
-            _sobj.data.update()
-            _smod = _sobj.modifiers.new(name="SkyDissolve", type="DECIMATE")
-            _smod.decimate_type = "DISSOLVE"
-            _smod.angle_limit = _sdmath.radians(1.0)
-            if len(_sobj.data.polygons) > 3:
-                bpy.ops.object.modifier_apply(modifier=_smod.name)
-            else:
-                _sobj.modifiers.remove(_smod)
-            if len(_sobj.data.polygons) == 0:
-                bpy.data.objects.remove(_sobj, do_unlink=True)
-                continue
-            sky_surviving.append(_sobj)
-        sky_imported = sky_surviving
+        bpy.ops.object.select_all(action="DESELECT")
+        for _o in sky_imported:
+            _o.select_set(True)
+        if sky_imported:
+            bpy.context.view_layer.objects.active = sky_imported[0]
+            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.mesh.separate(type='MATERIAL')
+            bpy.ops.object.mode_set(mode='OBJECT')
+            sky_imported = [o for o in bpy.context.selected_objects if o.type == 'MESH' and len(o.data.polygons) > 0]
+        print(f"== blend_export: {len(sky_imported)} per-material sky mesh objects ready", flush=True)
 
         sky_level_name = args.level_name + "_sky"
         sky_level_root = bpy.data.objects.new("Sky Level Root", None)

@@ -224,7 +224,7 @@ def generate_collision_from_obj(obj_path: Path, out_path: Path, level_name: str,
     import io as _io
 
     vertices: list = []
-    faces: list = []
+    raw_faces: list = []
 
     with open(obj_path, encoding="utf-8", errors="replace") as _f:
         for line in _f:
@@ -235,15 +235,33 @@ def generate_collision_from_obj(obj_path: Path, out_path: Path, level_name: str,
                 p = line.split()[1:]
                 idx = [int(pt.split("/")[0]) - 1 for pt in p]
                 for i in range(1, len(idx) - 1):
-                    a, b, c = idx[0], idx[i], idx[i + 1]
-                    v1, v2, v3 = vertices[a], vertices[b], vertices[c]
-                    ax, ay, az = v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]
-                    bx, by, bz = v3[0]-v2[0], v3[1]-v2[1], v3[2]-v2[2]
-                    ny = az * bx - ax * bz
-                    if ny < 0:
-                        faces.append((a, c, b))
-                    else:
-                        faces.append((a, b, c))
+                    raw_faces.append((idx[0], idx[i], idx[i + 1]))
+
+    _snap_res = 0.1
+    _snap_map: dict = {}
+    _remap: list = []
+    _uniq_verts: list = []
+    for x, y, z in vertices:
+        key = (round(x / _snap_res), round(y / _snap_res), round(z / _snap_res))
+        if key not in _snap_map:
+            _snap_map[key] = len(_uniq_verts)
+            _uniq_verts.append((x, y, z))
+        _remap.append(_snap_map[key])
+    vertices = _uniq_verts
+
+    faces: list = []
+    for r0, r1, r2 in raw_faces:
+        a, b, c = _remap[r0], _remap[r1], _remap[r2]
+        if a == b or b == c or a == c:
+            continue
+        v1, v2, v3 = vertices[a], vertices[b], vertices[c]
+        ax, ay, az = v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2]
+        bx, by, bz = v3[0]-v2[0], v3[1]-v2[1], v3[2]-v2[2]
+        ny = az * bx - ax * bz
+        if ny < 0:
+            faces.append((a, c, b))
+        else:
+            faces.append((a, b, c))
 
     array_name = f"{level_name}_area_1_collision"
 

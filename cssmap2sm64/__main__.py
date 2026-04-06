@@ -169,12 +169,9 @@ def main():
     cfg.setdefault("point_light_intensity_mult", 1.0)
     cfg.setdefault("area_id", 1)
     cfg.setdefault("is_custom_level", True)
-    cfg.setdefault("texture_resolution_limit", 512)
     cfg.setdefault("default_background", "ABOVE_CLOUDS")
     cfg.setdefault("sky_map", {})
-    cfg.setdefault("decimate_ratio", 1.0)
     cfg.setdefault("sky_radius", 0.0)
-    cfg.setdefault("max_visual_polys", 0)
 
     bsp = Path(args.bsp).resolve()
     if not bsp.exists():
@@ -304,12 +301,10 @@ def main():
             extra_vtfs = extract_vpk.extract_materials_from_vpk(game_path, needed, str(tex_dir))
             vtf_files = vtf_files + extra_vtfs
 
-    _res = cfg["texture_resolution_limit"]
-    max_size = "0" if _res == "auto" else str(int(_res))
     if vtf_files:
         list_file = out / "vtf_list.txt"
         with open(list_file, "w") as lf:
-            lf.write(max_size + "\n")
+            lf.write("0\n")
             for vtf in vtf_files:
                 lf.write(vtf + "\n")
                 lf.write(str(Path(vtf).with_suffix(".png")) + "\n")
@@ -345,9 +340,11 @@ def main():
             game_path, skyname, str(tex_dir), str(vtf2png_bin)
         )
         if cube_pngs:
+            _bl_sky_origin = tuple(v / _net for v in sm64_sky_origin)
             sky_cubemap.generate_cubemap_obj(
                 str(sky_cube_obj_path), skyname,
-                tex_dir=str(tex_dir), sm64_origin=sm64_sky_origin
+                box_radius=20000.0 / _net,
+                tex_dir=str(tex_dir), sm64_origin=_bl_sky_origin
             )
             print(f"  Cubemap box: {len(cube_pngs)} faces -> {sky_cube_obj_path.name}")
         else:
@@ -412,16 +409,6 @@ def main():
         print(f"Done. Output in {out}/")
         return
 
-    # --- Auto-decimate: count OBJ faces, limit visual polys sent to Fast64 ---
-    #_max_vis = cfg["max_visual_polys"]
-    #_decimate_ratio = cfg["decimate_ratio"]
-    #if _max_vis > 0 and obj_path.exists():
-    #    _face_count = sum(1 for _ln in open(obj_path, encoding="utf-8", errors="replace") if _ln.startswith("f "))
-    #    print(f"  OBJ faces: {_face_count}")
-    #    if _face_count > _max_vis:
-    #        _decimate_ratio = min(_decimate_ratio, _max_vis / _face_count)
-    #        print(f"  Auto-decimate: ratio={_decimate_ratio:.3f} (max_visual_polys={_max_vis})")
-
     print("[3/4] Exporting to SM64 via Blender/Fast64...")
     sm64_out = out / "sm64_level"
     blend_run.run(
@@ -435,7 +422,6 @@ def main():
         spawn=spawn_bl,
         materials_json=materials_json,
         background=background,
-        decimate_ratio=1.0,#_decimate_ratio,
         props_json=props_file if props_file.exists() else None,
         bsp_scale=cfg["scale_factor"],
         env_json=env_json_path,
@@ -446,7 +432,8 @@ def main():
     )
     level_name = cfg["level_name"]
     print("[4/5] Converting Fast64 output to native sm64-port format...")
-    native_out = out / "native_level" / level_name
+    sm64_port_path = cfg.get("sm64_port_path", "")
+    native_out = Path(sm64_port_path) / "levels" / level_name if sm64_port_path else out / "native_level" / level_name
     sky_camera_data = None
     if sky_cam_path.exists():
         with open(sky_cam_path) as _scf:
@@ -497,18 +484,7 @@ def main():
             blender_to_sm64_scale=cfg["blender_to_sm64_scale"],
             collision_divisor=cfg["collision_divisor"],
         )
-
-    sm64_port_path = cfg.get("sm64_port_path", "")
-    if sm64_port_path:
-        sm64_port = Path(sm64_port_path)
-        dest = sm64_port / "levels" / level_name
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(native_out, dest)
-        print(f"  -> deployed to {dest}")
-    else:
-        print(f"Done. Native level in {native_out}/")
-    print(f"  -> copy to sm64-port/levels/{level_name}/")
+    print(f"  -> deployed to {native_out}")
 
 
 if __name__ == "__main__":
